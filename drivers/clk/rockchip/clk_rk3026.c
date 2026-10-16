@@ -465,6 +465,7 @@ static ulong rk3026_clk_get_rate(struct clk *clk)
 	case PCLK_I2C1:
 	case PCLK_I2C2:
 	case PCLK_I2C3:
+	case PCLK_WDT:
 		return rk3026_peri_get_rate(priv->cru,
 					    rkclk_pll_get_rate(priv->cru,
 							       CLK_GENERAL),
@@ -560,6 +561,9 @@ static const struct rk3026_gate rk3026_gates[] = {
 	 * id in dt-bindings/clock/rk3026-cru.h, so they cannot be requested. */
 	{ PCLK_TIMER0,	1, { { 7, 7 } } },
 	{ PCLK_TIMER1,	1, { { 7, 8 } } },
+
+	/* dw-wdt APB clock (CLKGATE_CON7 b15), child of pclk_periph */
+	{ PCLK_WDT,	1, { { 7, 15 } } },
 
 	{ PCLK_GPIO0,	1, { { 8, 9 } } },
 	{ PCLK_GPIO1,	1, { { 8, 10 } } },
@@ -670,6 +674,17 @@ static int rk3026_clk_bind(struct udevice *dev)
 	struct udevice *sys_child;
 	struct sysreset_reg *priv;
 
+	/*
+	 * ONYX RC2: the board's own sysreset (onyx-rc2.c) picks the reset
+	 * method (fst / snd / core) from Kconfig or the environment.
+	 */
+	if (IS_ENABLED(CONFIG_TARGET_ONYX_RC2)) {
+		ret = device_bind_driver(dev, "rc2_sysreset", "sysreset", NULL);
+		if (ret)
+			debug("Warning: No rc2 sysreset driver: ret=%d\n", ret);
+		goto reset_bind;
+	}
+
 	/* The reset driver does not have a device node, so bind it here */
 	ret = device_bind_driver(dev, "rockchip_sysreset", "sysreset",
 				 &sys_child);
@@ -684,6 +699,7 @@ static int rk3026_clk_bind(struct udevice *dev)
 		dev_set_priv(sys_child, priv);
 	}
 
+reset_bind:
 #if CONFIG_IS_ENABLED(RESET_ROCKCHIP)
 	ret = offsetof(struct rk3026_cru, cru_softrst_con[0]);
 	ret = rockchip_reset_bind(dev, ret, 9);
