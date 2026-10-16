@@ -180,7 +180,7 @@ static void __noreturn rc2_core_reset(void)
 	void (*fn)(void) = (void *)CORE_RESET_IMEM;
 	size_t n = rc2_core_reset_end - rc2_core_reset_start;
 
-	cleanup_before_linux();		/* IRQs, D-cache (flushed), MMU, I-cache off */
+	/* caller ran cleanup_before_linux(): IRQs, D-cache (cleaned), MMU, I-cache off */
 	memcpy((void *)CORE_RESET_IMEM, rc2_core_reset_start, n);
 	dsb();
 	isb();
@@ -201,7 +201,12 @@ static int rc2_sysreset_request(struct udevice *dev, enum sysreset_t type)
 	printf("rc2: reset (%s)\n", m);
 	mdelay(20);
 	rc2_remap_off();
-	flush_dcache_all();
+	/*
+	 * Clean and switch off the caches first: the Cortex-A9 keeps its L1
+	 * across a warm reset, and dirty lines written back later would land
+	 * on whatever the next boot has loaded.
+	 */
+	cleanup_before_linux();
 
 	if (!strcmp(m, "fst"))
 		writel(0xfdb9, (void __iomem *)CRU_GLB_SRST_FST);

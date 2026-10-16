@@ -32,8 +32,7 @@
 	"kernel_addr_r=0x61000000\0" \
 	"fdt_addr_r=0x61f00000\0" \
 	"ramdisk_addr_r=0x62000000\0" \
-	"fdt_high=0xffffffff\0" \
-	"initrd_high=0xffffffff\0" \
+	"bootm_size=0x10000000\0" \
 	"bootlimit=2\0" \
 	"rc2_wdt=1\0" \
 	"rc2_wdt_ms=15000\0" \
