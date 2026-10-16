@@ -12,6 +12,16 @@ config TARGET_BOOX_C67ML
 	  Cortex-A9, 512 MB DDR3, 4 GB raw NAND (closed FTL, unusable by
 	  mainline), microSD, E Ink display.
 
+config TARGET_ONYX_RC2
+	bool "ONYX BOOX Robinson Crusoe 2"
+	select BOARD_LATE_INIT
+	help
+	  Support for the ONYX BOOX Robinson Crusoe 2 (MC_Kepler_R2), RK3026,
+	  512 MiB DDR3, eMMC, microSD, E Ink display. U-Boot proper only:
+	  it is loaded from the microSD card by the stock DDR init and a
+	  small second stage that jumps to it like to a kernel, so DDR is
+	  already up. The eMMC is never described or probed.
+
 endchoice
 
 config ROCKCHIP_BOOT_MODE_REG
@@ -47,5 +57,6 @@ config SPL_SERIAL
 	default y
 
 source "board/rockchip/boox-c67ml/Kconfig"
+source "board/rockchip/onyx-rc2/Kconfig"
 
 endif

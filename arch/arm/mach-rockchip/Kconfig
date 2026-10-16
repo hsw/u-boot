@@ -28,7 +28,8 @@ config ROCKCHIP_RK3026
 	bool "Support Rockchip RK3026"
 	select CPU_V7A
 	select SUPPORT_SPL
-	select SPL
+	# ONYX RC2: U-Boot proper only, DDR is set up by the stock DDR init
+	select SPL if !TARGET_ONYX_RC2
 	imply SPL_SERIAL
 	imply ROCKCHIP_COMMON_BOARD
 	help

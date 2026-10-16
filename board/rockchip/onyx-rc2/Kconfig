@@ -1,0 +1,31 @@
+if TARGET_ONYX_RC2
+
+config SYS_BOARD
+	default "onyx-rc2"
+
+config SYS_VENDOR
+	default "rockchip"
+
+config SYS_CONFIG_NAME
+	default "onyx_rc2"
+
+config RC2_RESET_METHOD
+	string "Default reset method (fst, snd or core)"
+	default "core"
+	help
+	  How the "reset" command (and anything else that asks the sysreset
+	  uclass for a reset) resets the RK3026. The environment variable
+	  rc2_reset overrides it at run time, so the device test can try
+	  every method without a rebuild.
+
+	  fst:  CRU_GLB_SRST_FST_VALUE = 0xfdb9 (first global reset).
+	  snd:  CRU_GLB_SRST_SND_VALUE = 0xeca8 (second global reset; keeps
+	        the GRF; mainline "reboot" with it hangs the board).
+	  core: the stock 3.0 kernel's way, from IMEM: all PLLs to slow
+	        mode, then SOFTRST_CON0 = 0x801cffff (MCORE, CORE0, CORE1,
+	        L2C). The stock kernel's reboot from SD lands on the SD.
+
+	  Which of them brings the BootROM back to the microSD card is a
+	  device test item.
+
+endif
