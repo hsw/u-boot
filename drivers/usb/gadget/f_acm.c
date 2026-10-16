@@ -11,11 +11,13 @@
 
 #include <circbuf.h>
 #include <console.h>
+#include <env.h>
 #include <errno.h>
 #include <g_dnl.h>
 #include <malloc.h>
 #include <memalign.h>
 #include <stdio_dev.h>
+#include <time.h>
 #include <version.h>
 #include <watchdog.h>
 
@@ -629,6 +631,7 @@ static void acm_stdio_puts(struct stdio_dev *dev, const char *str)
 static int acm_stdio_start(struct stdio_dev *dev)
 {
 	struct udevice *udc;
+	ulong start, wait;
 	int ret;
 
 	if (dev->priv) { /* function already exist */
@@ -662,12 +665,23 @@ static int acm_stdio_start(struct stdio_dev *dev)
 	 */
 	BOOX_STEP_AT_R(77);
 
-	while (!acm_connected(dev)) {
+	/*
+	 * Wait at most usbacm_wait ms (default 3000) for a host to open the
+	 * port, then go on unconnected: output is buffered (putc/puts never
+	 * block without a host) and tstc() keeps servicing the controller, so a
+	 * host that opens the port later still gets the console. Waiting
+	 * forever would keep a board without a terminal on USB from booting.
+	 */
+	start = get_timer(0);
+	wait = env_get_ulong("usbacm_wait", 10, 3000);
+	while (!acm_connected(dev) && get_timer(start) < wait) {
 		if (ctrlc())
 			return -ECANCELED;
 
 		schedule();
 	}
+	if (!acm_connected(dev))
+		return 0;
 	BOOX_STEP_AT_R(78);		/* a host opened the port */
 
 	return 0;
