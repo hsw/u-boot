@@ -139,6 +139,14 @@ void otg_phy_init(struct dwc2_udc *dev)
 {
 	writel(GATE_HCLK_OTG0, (void __iomem *)CRU_CLKGATE_CON5);
 	writel(GATE_OTGPHY0, (void __iomem *)CRU_CLKGATE_CON1);
+	/*
+	 * Every gadget start (the ACM console at boot, ums, ACM again after
+	 * ums): off the bus for 100 ms first, so the host sees a detach and
+	 * enumerates the new gadget from scratch (vendor U-Boot: 500 ms; the
+	 * core's own disconnect in reconfig_usbd() is 20 us).
+	 */
+	setbits_le32((void __iomem *)OTG_DCTL, OTG_DCTL_SFTDISCON);
+	mdelay(100);
 	writel(0x34000000, (void __iomem *)GRF_UOC1_CON4);
 	writel(0x00e000e0, (void __iomem *)CRU_SOFTRST_CON4);
 	udelay(3000);
