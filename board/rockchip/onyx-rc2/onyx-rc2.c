@@ -54,6 +54,9 @@ DECLARE_GLOBAL_DATA_PTR;
 #define GRF_SOC_CON0		(GRF_BASE + 0x140)
 #define GRF_UOC1_CON4		(GRF_BASE + 0x190)
 
+#define OTG_DCTL		(0x10180000 + 0x804)
+#define OTG_DCTL_SFTDISCON	BIT(1)
+
 #define GPIO1_BASE		0x20080000
 #define GPIO2_BASE		0x20084000
 #define GPIO_SWPORTA_DR		0x00
@@ -200,6 +203,15 @@ static int rc2_sysreset_request(struct udevice *dev, enum sysreset_t type)
 
 	printf("rc2: reset (%s)\n", m);
 	mdelay(20);
+	/*
+	 * Leave the bus before the reset (soft disconnect: D+ pull-up off) and
+	 * give the host time to see it, so the next boot's gadget enumerates
+	 * as a new device whatever the reset method leaves of the OTG block.
+	 * After a U-Boot fst reset the host never saw U-Boot's ACM port again
+	 * (core and snd were fine; book round of 2026-10-17).
+	 */
+	setbits_le32((void __iomem *)OTG_DCTL, OTG_DCTL_SFTDISCON);
+	mdelay(100);
 	rc2_remap_off();
 	/*
 	 * Clean and switch off the caches first: the Cortex-A9 keeps its L1
