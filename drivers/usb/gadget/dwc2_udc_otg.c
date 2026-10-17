@@ -177,6 +177,7 @@ static void udc_disable(struct dwc2_udc *dev)
 {
 	debug_cond(DEBUG_SETUP != 0, "%s: %p\n", __func__, dev);
 
+	usb_gadget_trace(USB_TRACE_UDC_STOP, 0, 0);
 	udc_set_address(dev, 0);
 
 	dev->ep0state = WAIT_FOR_SETUP;
@@ -225,6 +226,8 @@ static void udc_reinit(struct dwc2_udc *dev)
 static int udc_enable(struct dwc2_udc *dev)
 {
 	debug_cond(DEBUG_SETUP != 0, "%s: %p\n", __func__, dev);
+
+	usb_gadget_trace(USB_TRACE_UDC_START, 0, 0);
 
 	/* a new gadget (e.g. ACM after ums): no state of the previous one */
 	reset_available = 1;
@@ -427,6 +430,7 @@ static void done(struct dwc2_ep *ep, struct dwc2_request *req, int status)
 static void nuke(struct dwc2_ep *ep, int status)
 {
 	struct dwc2_request *req;
+	unsigned int n = 0;
 
 	debug("%s: %s %p\n", __func__, ep->ep.name, ep);
 
@@ -434,6 +438,8 @@ static void nuke(struct dwc2_ep *ep, int status)
 	while (!list_empty(&ep->queue)) {
 		req = list_entry(ep->queue.next, struct dwc2_request, queue);
 		done(ep, req, status);
+		if (++n == 65)
+			usb_gadget_trace(USB_TRACE_NUKE_LOOP, ep->bEndpointAddress, 0);
 	}
 }
 
@@ -596,6 +602,7 @@ static void reconfig_usbd(struct dwc2_udc *dev)
 
 	/* 14. Initialize OTG Link Core.*/
 	writel(GAHBCFG_INIT, &reg->global_regs.gahbcfg);
+	dwc2_udc_diag.gahbcfg = GAHBCFG_INIT;
 }
 
 static void set_max_pktsize(struct dwc2_udc *dev, enum usb_device_speed speed)
@@ -642,6 +649,7 @@ static int dwc2_ep_enable(struct usb_ep *_ep,
 	    le16_to_cpu(get_unaligned(&desc->wMaxPacketSize))) {
 
 		debug("%s: bad ep or descriptor\n", __func__);
+		usb_gadget_trace(USB_TRACE_EP_ENABLE, desc ? desc->bEndpointAddress : 0, -EINVAL);
 		return -EINVAL;
 	}
 
@@ -686,6 +694,7 @@ static int dwc2_ep_enable(struct usb_ep *_ep,
 
 	debug("%s: enabled %s, stopped = %d, maxpacket = %d\n",
 	      __func__, _ep->name, ep->stopped, ep->ep.maxpacket);
+	usb_gadget_trace(USB_TRACE_EP_ENABLE, desc->bEndpointAddress, 0);
 	return 0;
 }
 
@@ -706,6 +715,8 @@ static int dwc2_ep_disable(struct usb_ep *_ep)
 		return -EINVAL;
 	}
 
+	usb_gadget_trace(USB_TRACE_EP_DISABLE, ep->bEndpointAddress,
+			 list_count_nodes(&ep->queue));
 	spin_lock_irqsave(&ep->dev->lock, flags);
 
 	/* Nuke all pending requests */

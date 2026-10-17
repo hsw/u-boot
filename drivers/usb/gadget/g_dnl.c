@@ -182,6 +182,10 @@ __weak int g_dnl_board_usb_cable_connected(void)
 	return -EOPNOTSUPP;
 }
 
+__weak void usb_gadget_trace(unsigned int ev, u32 a, u32 b)
+{
+}
+
 static bool g_dnl_detach_request;
 
 bool g_dnl_detach(void)

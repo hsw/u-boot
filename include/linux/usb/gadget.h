@@ -1014,4 +1014,43 @@ int udc_device_get_by_index(int index, struct udevice **udev);
  */
 int udc_device_put(struct udevice *udev);
 
+/*
+ * Local diagnostics (ONYX RC2, not for upstream in this form): gadget
+ * events for a board that records them, e.g. in memory that survives a
+ * reset. ev is one of USB_TRACE_*, a and b depend on it; the default
+ * usb_gadget_trace() does nothing.
+ */
+enum {
+	USB_TRACE_UDC_START = 0x01,	/* udc_enable: a gadget starts */
+	USB_TRACE_UDC_STOP,		/* udc_disable */
+	USB_TRACE_USBRST,		/* a: 0 core re-init, 1 skipped, 2 no session; b: GOTGCTL */
+	USB_TRACE_ENUMDONE,		/* a: DSTS.EnumSpd */
+	USB_TRACE_SUSPEND,
+	USB_TRACE_RESUME,
+	USB_TRACE_SESEND,		/* OTG session end: the driver's disconnect */
+	USB_TRACE_SETUP = 0x10,		/* a: bRequestType | bRequest << 8 | wValue << 16, b: wIndex | wLength << 16 */
+	USB_TRACE_SETUP_IGNORED,	/* SETUP while EP0 is not waiting for one; a, b as SETUP */
+	USB_TRACE_SETUP_STALL,		/* the function refused it; a as SETUP, b: error */
+	USB_TRACE_EP_ENABLE,		/* a: endpoint address, b: result */
+	USB_TRACE_EP_DISABLE,		/* a: endpoint address, b: requests still queued */
+	USB_TRACE_NUKE_LOOP,		/* nuke() gave back more than 64 requests; a: address */
+	USB_TRACE_SET_CONFIG = 0x20,	/* a: value, b: 1 if a configuration was set (reset_config) */
+	USB_TRACE_DISCONNECT,		/* composite_disconnect; a: 1 if configured */
+	USB_TRACE_ACM_BIND = 0x30,	/* a: in | out << 8 | notify << 16 endpoint addresses */
+	USB_TRACE_ACM_SET_ALT,		/* a: interface, b: result */
+	USB_TRACE_ACM_DISABLE,		/* a: req_in, req_out still allocated (bits 0, 1); b: tx_on */
+	USB_TRACE_ACM_LINE_STATE,	/* SET_CONTROL_LINE_STATE; a: wValue (bit 0 DTR) */
+	USB_TRACE_ACM_LINE_CODING,	/* SET_LINE_CODING; a: wLength */
+	USB_TRACE_ACM_BAD_REQ,		/* a, b as SETUP */
+	USB_TRACE_ACM_START,		/* stdio start; a: connected, b: ms waited */
+	USB_TRACE_ACM_STOP,
+	USB_TRACE_ACM_TX_STALL,		/* __acm_tx gave up waiting; a: handshake bits, b: bytes left */
+	USB_TRACE_ACM_TX_QUEUE,		/* a: length, b: usb_ep_queue() result */
+	USB_TRACE_ACM_TX_DONE,		/* a: status, b: actual */
+	USB_TRACE_ACM_RX_DONE,		/* a: status, b: actual */
+	USB_TRACE_BOARD = 0x40,		/* 0x40-0x4f: board events */
+};
+
+void usb_gadget_trace(unsigned int ev, u32 a, u32 b);
+
 #endif	/* __LINUX_USB_GADGET_H */

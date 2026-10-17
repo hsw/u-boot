@@ -377,6 +377,7 @@ static int set_config(struct usb_composite_dev *cdev,
 	int			tmp;
 	struct usb_function	*f;
 
+	usb_gadget_trace(USB_TRACE_SET_CONFIG, number, !!cdev->config);
 	if (cdev->config)
 		reset_config(cdev);
 
@@ -1319,6 +1320,7 @@ static void composite_disconnect(struct usb_gadget *gadget)
 {
 	struct usb_composite_dev	*cdev = get_gadget_data(gadget);
 
+	usb_gadget_trace(USB_TRACE_DISCONNECT, !!cdev->config, 0);
 	if (cdev->config)
 		reset_config(cdev);
 	if (composite->disconnect)

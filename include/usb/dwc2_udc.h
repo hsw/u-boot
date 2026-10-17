@@ -34,6 +34,23 @@ struct dwc2_plat_otg_data {
 
 int dwc2_udc_probe(struct dwc2_plat_otg_data *pdata);
 
+/*
+ * Local diagnostics (ONYX RC2): counters of the non-DM gadget's bulk and
+ * interrupt IN endpoints. The board clears and reads them.
+ */
+struct dwc2_udc_diag {
+	u32 in_compl;		/* XferCompl taken */
+	u32 in_bytes;		/* bytes given back as sent */
+	u32 ahberr;		/* DIEPINT bits seen (cleared, not acted on) */
+	u32 timeout;
+	u32 intknepmis;
+	u32 txfundrn;
+	u32 bna;
+	u32 gahbcfg;		/* value written at the last gadget start */
+};
+
+extern struct dwc2_udc_diag dwc2_udc_diag;
+
 int dwc2_udc_B_session_valid(struct udevice *dev);
 
 #endif	/* __DWC2_USB_GADGET */

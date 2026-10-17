@@ -25,6 +25,13 @@
 static u8 clear_feature_num;
 int clear_feature_flag;
 
+struct dwc2_udc_diag dwc2_udc_diag;
+
+/* SETUP packet as two trace words (USB_TRACE_SETUP) */
+#define SETUP_TRACE_A(c)	((c)->bRequestType | (c)->bRequest << 8 | \
+				 le16_to_cpu((c)->wValue) << 16)
+#define SETUP_TRACE_B(c)	(le16_to_cpu((c)->wIndex) | le16_to_cpu((c)->wLength) << 16)
+
 /* Bulk-Only Mass Storage Reset (class-specific request) */
 #define GET_MAX_LUN_REQUEST	0xFE
 #define BOT_RESET_REQUEST	0xFF
@@ -283,6 +290,11 @@ static void complete_tx(struct dwc2_udc *dev, u8 ep_num)
 
 	ep_tsr = readl(&reg->device_regs.in_endp[ep_num].dieptsiz);
 
+	if (ep_num != EP0_CON) {
+		dwc2_udc_diag.in_compl++;
+		dwc2_udc_diag.in_bytes += ep->len;
+	}
+
 	xfer_size = ep->len;
 	is_short = (xfer_size < ep->ep.maxpacket);
 	req->req.actual += min(xfer_size, req->req.length - req->req.actual);
@@ -381,6 +393,16 @@ static void process_ep_in_intr(struct dwc2_udc *dev)
 
 			/* Interrupt Clear */
 			writel(ep_intr_status, &reg->device_regs.in_endp[ep_num].diepint);
+
+			if (ep_num != EP0_CON) {
+				struct dwc2_udc_diag *d = &dwc2_udc_diag;
+
+				d->ahberr += !!(ep_intr_status & DIEPMSK_AHBERRMSK);
+				d->timeout += !!(ep_intr_status & DIEPMSK_TIMEOUTMSK);
+				d->intknepmis += !!(ep_intr_status & DIEPMSK_INTKNEPMISMSK);
+				d->txfundrn += !!(ep_intr_status & DIEPMSK_TXFIFOUNDRNMSK);
+				d->bna += !!(ep_intr_status & DIEPMSK_BNAININTRMSK);
+			}
 
 			if (ep_intr_status & DIEPMSK_XFERCOMPLMSK) {
 				complete_tx(dev, ep_num);
@@ -496,6 +518,7 @@ static int dwc2_udc_irq(int irq, void *_dev)
 
 		writel(GINTSTS_ENUMDONE, &reg->global_regs.gintsts);
 		usb_status = FIELD_GET(DSTS_ENUMSPD_MASK, readl(&reg->device_regs.dsts));
+		usb_gadget_trace(USB_TRACE_ENUMDONE, usb_status, 0);
 
 		if (usb_status != DSTS_ENUMSPD_HS) {
 			debug_cond(DEBUG_ISR,
@@ -520,6 +543,7 @@ static int dwc2_udc_irq(int irq, void *_dev)
 		debug_cond(DEBUG_ISR,
 			"\tSuspend interrupt :(DSTS):0x%x\n", usb_status);
 		writel(GINTSTS_USBSUSP, &reg->global_regs.gintsts);
+		usb_gadget_trace(USB_TRACE_SUSPEND, usb_status, 0);
 
 		if (dev->gadget.speed != USB_SPEED_UNKNOWN
 		    && dev->driver) {
@@ -535,6 +559,7 @@ static int dwc2_udc_irq(int irq, void *_dev)
 
 		if (gotgint & GOTGINT_SES_END_DET) {
 			debug_cond(DEBUG_ISR, "\t\tSession End Detected\n");
+			usb_gadget_trace(USB_TRACE_SESEND, gotgint, 0);
 			/* Let gadget detect disconnected state */
 			if (dev->driver && dev->driver->disconnect) {
 				spin_unlock_irqrestore(&dev->lock, flags);
@@ -548,6 +573,7 @@ static int dwc2_udc_irq(int irq, void *_dev)
 	if (intr_status & GINTSTS_WKUPINT) {
 		debug_cond(DEBUG_ISR, "\tResume interrupt\n");
 		writel(GINTSTS_WKUPINT, &reg->global_regs.gintsts);
+		usb_gadget_trace(USB_TRACE_RESUME, 0, 0);
 
 		if (dev->gadget.speed != USB_SPEED_UNKNOWN
 		    && dev->driver
@@ -563,6 +589,9 @@ static int dwc2_udc_irq(int irq, void *_dev)
 			"\tReset interrupt - (GOTGCTL):0x%x\n", usb_status);
 		writel(GINTSTS_USBRST, &reg->global_regs.gintsts);
 
+		usb_gadget_trace(USB_TRACE_USBRST,
+				 !(usb_status & (GOTGCTL_ASESVLD | GOTGCTL_BSESVLD)) ? 2 :
+				 reset_available ? 0 : 1, usb_status);
 		if (usb_status & (GOTGCTL_ASESVLD | GOTGCTL_BSESVLD)) {
 			if (reset_available) {
 				debug_cond(DEBUG_ISR,
@@ -1275,6 +1304,8 @@ static void dwc2_ep0_setup(struct dwc2_udc *dev)
 
 	/* read control req from fifo (8 bytes) */
 	dwc2_fifo_read(ep, usb_ctrl, 8);
+	usb_gadget_trace(USB_TRACE_SETUP | dev->ep0state << 8,
+			 SETUP_TRACE_A(usb_ctrl), SETUP_TRACE_B(usb_ctrl));
 
 	debug_cond(DEBUG_SETUP != 0,
 		   "%s: bRequestType = 0x%x(%s), bRequest = 0x%x"
@@ -1427,6 +1458,8 @@ static void dwc2_ep0_setup(struct dwc2_udc *dev)
 		spin_lock(&dev->lock);
 
 		if (i < 0) {
+			usb_gadget_trace(USB_TRACE_SETUP_STALL,
+					 SETUP_TRACE_A(usb_ctrl), i);
 			/* setup processing failed, force stall */
 			dwc2_udc_ep0_set_stall(ep);
 			dev->ep0state = WAIT_FOR_SETUP;
@@ -1459,6 +1492,9 @@ static void dwc2_handle_ep0(struct dwc2_udc *dev)
 		dwc2_ep0_setup(dev);
 
 	} else {
+		dwc2_fifo_read(&dev->ep[0], usb_ctrl, 8);
+		usb_gadget_trace(USB_TRACE_SETUP_IGNORED | dev->ep0state << 8,
+				 SETUP_TRACE_A(usb_ctrl), SETUP_TRACE_B(usb_ctrl));
 		debug_cond(DEBUG_OUT_EP != 0,
 			   "%s: strange state!!(state = %s)\n",
 			__func__, state_names[dev->ep0state]);

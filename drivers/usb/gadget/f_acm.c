@@ -261,6 +261,10 @@ static int acm_bind(struct usb_configuration *c, struct usb_function *f)
 	f_acm->ep_notify = ep;
 	ep->driver_data = c->cdev; /* claim */
 
+	usb_gadget_trace(USB_TRACE_ACM_BIND, acm_fs_in_desc.bEndpointAddress |
+			 acm_fs_out_desc.bEndpointAddress << 8 |
+			 acm_fs_notify_desc.bEndpointAddress << 16, 0);
+
 	if (gadget_is_dualspeed(gadget)) {
 		/* Assume endpoint addresses are the same for both speeds */
 		acm_hs_in_desc.bEndpointAddress = acm_fs_in_desc.bEndpointAddress;
@@ -293,6 +297,7 @@ static void acm_tx_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_acm *f_acm = req->context;
 
+	usb_gadget_trace(USB_TRACE_ACM_TX_DONE, req->status, req->actual);
 	f_acm->tx_on = true;
 	f_acm->tx_stalled = false;
 }
@@ -300,6 +305,8 @@ static void acm_tx_complete(struct usb_ep *ep, struct usb_request *req)
 static void acm_rx_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_acm *f_acm = req->context;
+
+	usb_gadget_trace(USB_TRACE_ACM_RX_DONE, req->status, req->actual);
 
 	/*
 	 * An error status means the UDC is taking the request back: the
@@ -389,11 +396,15 @@ static int acm_set_alt(struct usb_function *f, unsigned int intf, unsigned int a
 {
 	struct usb_gadget *gadget = f->config->cdev->gadget;
 	struct f_acm *f_acm = func_to_acm(f);
+	int ret;
 
 	if (intf == f_acm->ctrl_id) {
-		return acm_start_ctrl(f_acm, gadget);
+		ret = acm_start_ctrl(f_acm, gadget);
+		usb_gadget_trace(USB_TRACE_ACM_SET_ALT, intf, ret);
+		return ret;
 	} else if (intf == f_acm->data_id) {
-		acm_start_data(f_acm, gadget);
+		ret = acm_start_data(f_acm, gadget);
+		usb_gadget_trace(USB_TRACE_ACM_SET_ALT, intf, ret);
 		f_acm->connected = true;
 		f_acm->tx_on = true;
 		return 0;
@@ -421,6 +432,7 @@ static int acm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 			goto invalid;
 
 		value = w_length;
+		usb_gadget_trace(USB_TRACE_ACM_LINE_CODING, w_length, 0);
 
 		memcpy(&f_acm->line_coding, req->buf, value);
 
@@ -445,12 +457,16 @@ static int acm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 			goto invalid;
 
 		value = 0;
+		usb_gadget_trace(USB_TRACE_ACM_LINE_STATE, w_value, 0);
 
 		f_acm->handshake_bits = w_value;
 
 		break;
 	default:
 invalid:
+		usb_gadget_trace(USB_TRACE_ACM_BAD_REQ, ctrl->bRequestType |
+				 ctrl->bRequest << 8 | w_value << 16,
+				 w_index | w_length << 16);
 		printf("invalid control req%02x.%02x v%04x i%04x l%d\n",
 		       ctrl->bRequestType, ctrl->bRequest, w_value, w_index,
 		       w_length);
@@ -470,6 +486,8 @@ static void acm_disable(struct usb_function *f)
 {
 	struct f_acm *f_acm = func_to_acm(f);
 
+	usb_gadget_trace(USB_TRACE_ACM_DISABLE, (f_acm->req_in ? 1 : 0) |
+			 (f_acm->req_out ? 2 : 0), f_acm->tx_on);
 	usb_ep_disable(f_acm->ep_out);
 	usb_ep_disable(f_acm->ep_in);
 	usb_ep_disable(f_acm->ep_notify);
@@ -530,6 +548,9 @@ static void __acm_tx(struct f_acm *f_acm)
 			if (f_acm->tx_stalled)
 				break;
 			if (get_timer(start) > ACM_TX_TIMEOUT_MS) {
+				usb_gadget_trace(USB_TRACE_ACM_TX_STALL,
+						 f_acm->handshake_bits,
+						 f_acm->tx_buf.size);
 				f_acm->tx_stalled = true;
 				break;
 			}
@@ -543,6 +564,7 @@ static void __acm_tx(struct f_acm *f_acm)
 		f_acm->req_in->length = len;
 
 		ret = usb_ep_queue(f_acm->ep_in, f_acm->req_in, 0);
+		usb_gadget_trace(USB_TRACE_ACM_TX_QUEUE, len, ret);
 		if (ret)
 			break;
 
@@ -715,6 +737,7 @@ static int acm_stdio_start(struct stdio_dev *dev)
 
 		schedule();
 	}
+	usb_gadget_trace(USB_TRACE_ACM_START, acm_connected(dev), get_timer(start));
 	if (!acm_connected(dev))
 		return 0;
 	BOOX_STEP_AT_R(78);		/* a host opened the port */
@@ -724,6 +747,7 @@ static int acm_stdio_start(struct stdio_dev *dev)
 
 static int acm_stdio_stop(struct stdio_dev *dev)
 {
+	usb_gadget_trace(USB_TRACE_ACM_STOP, 0, 0);
 	g_dnl_unregister();
 	g_dnl_clear_detach();
 	dev->priv = NULL;
