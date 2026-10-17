@@ -17,10 +17,12 @@ config TARGET_ONYX_RC2
 	select BOARD_LATE_INIT
 	help
 	  Support for the ONYX BOOX Robinson Crusoe 2 (MC_Kepler_R2), RK3026,
-	  512 MiB DDR3, eMMC, microSD, E Ink display. U-Boot proper only:
-	  it is loaded from the microSD card by the stock DDR init and a
-	  small second stage that jumps to it like to a kernel, so DDR is
-	  already up. The eMMC is never described or probed.
+	  512 MiB DDR3, eMMC, microSD, E Ink display. onyx_rc2_defconfig:
+	  U-Boot proper only, loaded from the microSD card by the stock DDR
+	  init and a small second stage that jumps to it like to a kernel.
+	  onyx_rc2_mspl_defconfig: the RK3026 SPL does the DDR init and the
+	  mask ROM loads U-Boot proper (trial). The eMMC is never described
+	  or probed.
 
 endchoice
 
@@ -40,6 +42,16 @@ config ROCKCHIP_STIMER_BASE
 	  implemented, so this address should not decode -- yet this is the value
 	  that was in the tree when the SPL demonstrably ran. Do not "fix" it
 	  again without a boot to show for it.
+
+config RK3026_SPL_TIMER_STASH
+	bool "SPL: report the global timer calibration in GRF_OS_REG2..4"
+	depends on SPL
+	default y if TARGET_BOOX_C67ML
+	help
+	  The SPL measures the A9 global timer against timer0 and leaves the
+	  result in GRF_OS_REG2..4 for U-Boot proper to print. OS_REG4 is the
+	  vendor loader's reboot-mode register, so boards that keep the
+	  vendor loader on their internal storage leave this off.
 
 config SYS_SOC
 	default "rk3026"

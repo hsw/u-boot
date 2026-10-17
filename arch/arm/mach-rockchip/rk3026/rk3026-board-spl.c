@@ -262,6 +262,8 @@ void rockchip_stimer_init(void)
 	 * CFG_SYS_TIMER_RATE from the config. This is what tells us at the prompt
 	 * whether that constant still matches the hardware.
 	 */
+	if (!IS_ENABLED(CONFIG_RK3026_SPL_TIMER_STASH))
+		return;			/* the measurement is only reported */
 	mhz = spl_gt_measure_mhz();
 	spl_gt_measured_mhz = mhz;
 }
@@ -537,8 +539,18 @@ static void boox_counter_probe(void)
 }
 #endif
 
+/*
+ * Board pins that must be set before anything else (a power hold), from the
+ * board's SPL code; the default does nothing.
+ */
+__weak void rk3026_spl_board_init_f(void)
+{
+}
+
 void board_init_f(ulong dummy)
 {
+	rk3026_spl_board_init_f();
+
 	/*
 	 * The Cortex-A9 does not invalidate its caches on reset. After a warm
 	 * reset (GLB_SRST, watchdog) from a kernel that did not clean them, L1
@@ -573,8 +585,13 @@ void board_init_f(ulong dummy)
 
 	rockchip_stimer_init();
 
-	/* GRF scratch, so this needs no DRAM and survives a failed sdram_init(). */
-	spl_gt_stash();
+	/*
+	 * GRF scratch, so this needs no DRAM and survives a failed sdram_init().
+	 * Boards whose loader uses GRF_OS_REG4 (the vendor loader's reboot-mode
+	 * register) leave it out.
+	 */
+	if (IS_ENABLED(CONFIG_RK3026_SPL_TIMER_STASH))
+		spl_gt_stash();
 
 	/* 3: the timer block answered and the liveness probe finished. */
 	BOOX_STEP(3);
