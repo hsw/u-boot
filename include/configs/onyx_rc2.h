@@ -8,7 +8,9 @@
  * RC2DATA, writable from the host over "ums") or else partition 1 (ext4
  * rc2root, in the card image). The watchdog is started right before bootz
  * and the kernel DT's watchdog node is enabled, so a kernel with the dw_wdt
- * driver keeps it fed and a hung one is reset.
+ * driver keeps it fed and a hung one is reset. Optional steps end in
+ * "else true": the old hush gives an "if" without a taken branch the
+ * condition's status, which would fail "run rc2_load" / "run rc2_prep".
  *
  * Words in DDR (inside the kernel's no-map loader-log@7ffc0000, above the
  * stage2 pages 0x7fff0000-0x7fff4fff):
@@ -48,7 +50,7 @@
 		"if test -e mmc 0:${rc2_part} /rc2boot/${rc2_slot}/initrd.gz; then " \
 		"load mmc 0:${rc2_part} ${ramdisk_addr_r} " \
 		"/rc2boot/${rc2_slot}/initrd.gz && " \
-		"setenv rc2_rd ${ramdisk_addr_r}:${filesize}; fi\0" \
+		"setenv rc2_rd ${ramdisk_addr_r}:${filesize}; else true; fi\0" \
 	"rc2_load=run rc2_find && " \
 		"load mmc 0:${rc2_part} ${kernel_addr_r} /rc2boot/${rc2_slot}/zImage && " \
 		"load mmc 0:${rc2_part} ${fdt_addr_r} /rc2boot/${rc2_slot}/rc2.dtb && " \
@@ -59,7 +61,8 @@
 		"setenv bootargs \"${rc2_args} rc2.loader=uboot rc2.slot=${rc2_slot} " \
 		"rc2.part=${rc2_part} rc2.bootcount=${bootcount}\"; " \
 		"if test \"${rc2_wdt}\" = 1; then " \
-		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; fi\0" \
+		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; " \
+		"else true; fi\0" \
 	"rc2_boot=echo rc2: slot ${rc2_slot}; run rc2_load && run rc2_prep && " \
 		"bootz ${kernel_addr_r} ${rc2_rd} ${fdt_addr_r}\0" \
 	"rc2_bootcmd=setenv rc2_slot b; run rc2_boot; " \
