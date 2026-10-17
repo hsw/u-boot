@@ -1023,7 +1023,7 @@ int udc_device_put(struct udevice *udev);
 enum {
 	USB_TRACE_UDC_START = 0x01,	/* udc_enable: a gadget starts */
 	USB_TRACE_UDC_STOP,		/* udc_disable */
-	USB_TRACE_USBRST,		/* a: 0 core re-init, 1 skipped, 2 no session; b: GOTGCTL */
+	USB_TRACE_USBRST,		/* a: 2 no session, 3 bus reset (0 core re-init, 1 skipped: old builds); b: GOTGCTL */
 	USB_TRACE_ENUMDONE,		/* a: DSTS.EnumSpd */
 	USB_TRACE_SUSPEND,
 	USB_TRACE_RESUME,

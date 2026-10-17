@@ -211,6 +211,9 @@ void board_quiesce_devices(void)
 #define RC2_UTRACE_END		0x7fff7000
 #define RC2_UTRACE_HDR		16
 #define RC2_UTRACE_CAP		((RC2_UTRACE_END - RC2_UTRACE - 4 * RC2_UTRACE_HDR) / 16)
+/* entries 0..HEAD-1: the first events; HEAD..CAP-1: a ring of the latest ones */
+#define RC2_UTRACE_HEAD		100
+#define RC2_UTRACE_CAPWORD	(RC2_UTRACE_CAP | RC2_UTRACE_HEAD << 16)
 
 enum {	/* trace header words */
 	UT_MAGIC, UT_N, UT_CAP, UT_BOOTS,	/* events offered; capacity; boots left */
@@ -218,6 +221,9 @@ enum {	/* trace header words */
 	UT_LINESTATE,				/* last SET_CONTROL_LINE_STATE */
 	UT_HEARTBEAT,				/* rc2_acmwait: +1 every 100 ms */
 	UT_LAST_MS,				/* time of the last event */
+	UT_USBRST,				/* bus resets seen */
+	UT_ENUM,				/* ENUMDONE: high speed | other << 16 */
+	UT_SETUPS,				/* SETUP packets */
 };
 
 enum {	/* board events */
@@ -242,15 +248,15 @@ static void rc2_clean(ulong a, ulong len)
 static void rc2_utrace_log(u32 *h, unsigned int ev, u32 a, u32 b)
 {
 	u32 n = h[UT_N]++;
-	u32 *e = (u32 *)(RC2_UTRACE + 4 * RC2_UTRACE_HDR) + 4 * n;
+	u32 slot = n < RC2_UTRACE_HEAD ? n : RC2_UTRACE_HEAD +
+		   (n - RC2_UTRACE_HEAD) % (RC2_UTRACE_CAP - RC2_UTRACE_HEAD);
+	u32 *e = (u32 *)(RC2_UTRACE + 4 * RC2_UTRACE_HDR) + 4 * slot;
 
-	if (n < RC2_UTRACE_CAP) {
-		e[0] = ev;
-		e[1] = get_timer(0);
-		e[2] = a;
-		e[3] = b;
-		rc2_clean((ulong)e, 16);
-	}
+	e[0] = ev;
+	e[1] = get_timer(0);
+	e[2] = a;
+	e[3] = b;
+	rc2_clean((ulong)e, 16);
 }
 
 void usb_gadget_trace(unsigned int ev, u32 a, u32 b)
@@ -261,7 +267,7 @@ void usb_gadget_trace(unsigned int ev, u32 a, u32 b)
 	if (!rc2_utrace_state) {
 		rc2_utrace_state = -1;
 		if (h[UT_MAGIC] == RC2_UTRACE_MAGIC && h[UT_BOOTS] &&
-		    h[UT_CAP] == RC2_UTRACE_CAP) {
+		    h[UT_CAP] == RC2_UTRACE_CAPWORD) {
 			h[UT_BOOTS]--;
 			rc2_utrace_state = 1;
 			rc2_utrace_log(h, RC2_TRACE_BOOT, *(u32 *)0x7fff6000, 0);
@@ -271,6 +277,15 @@ void usb_gadget_trace(unsigned int ev, u32 a, u32 b)
 		return;
 
 	switch (ev & 0xff) {
+	case USB_TRACE_USBRST:
+		h[UT_USBRST]++;
+		break;
+	case USB_TRACE_ENUMDONE:
+		h[UT_ENUM] += a ? 0x10000 : 1;	/* DSTS.EnumSpd 0 = high speed */
+		break;
+	case USB_TRACE_SETUP:
+		h[UT_SETUPS]++;
+		break;
 	case USB_TRACE_ACM_SET_ALT:
 		rc2_utrace_burst = 0;
 		break;
@@ -328,7 +343,7 @@ static int do_rc2_ustat(struct cmd_tbl *cmdtp, int flag, int argc, char *const a
 		rc2_ustat_write(1);
 		memset(h, 0, 4 * RC2_UTRACE_HDR);
 		h[UT_MAGIC] = RC2_UTRACE_MAGIC;
-		h[UT_CAP] = RC2_UTRACE_CAP;
+		h[UT_CAP] = RC2_UTRACE_CAPWORD;
 		h[UT_BOOTS] = 1;
 		rc2_utrace_state = 1;
 		usb_gadget_trace(RC2_TRACE_USTAT_START, rc2_ustat_cfg, 0);
