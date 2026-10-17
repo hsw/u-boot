@@ -134,8 +134,17 @@ static int setdma_tx(struct dwc2_ep *ep, struct dwc2_request *req)
 	buf = req->req.buf + req->req.actual;
 	length = req->req.length - req->req.actual;
 
+	/*
+	 * Split like setdma_rx() (and like the Linux gadget's 16 KiB mass
+	 * storage requests): the RK3026 OTG core sends wrong data for a
+	 * 128 KiB IN DMA. A multiple of maxpacket, so only the last chunk can
+	 * be short; complete_tx() starts the next chunk until the request is
+	 * done.
+	 */
 	if (ep_num == EP0_CON)
 		length = min(length, (u32)ep_maxpacket(ep));
+	else
+		length = min_t(u32, length, DMA_BUFFER_SIZE);
 
 	ep->len = length;
 	ep->dma_buf = buf;
