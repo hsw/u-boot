@@ -11,6 +11,9 @@
  * driver keeps it fed and a hung one is reset. Optional steps end in
  * "else true": the old hush gives an "if" without a taken branch the
  * condition's status, which would fail "run rc2_load" / "run rc2_prep".
+ * "run rc2_wdt_state" sets rc2_wdt_on to WDT_CR bit 0 (WDT_EN) of the
+ * dw-wdt at 0x2004c000 ("wdt dev" first: its probe turns pclk_wdt on and
+ * cannot clear WDT_EN); read only.
  *
  * "run rc2_ums" exports the card over USB mass storage until the host
  * ejects it, then brings the CDC ACM console back:
@@ -21,7 +24,11 @@
  *   rc2_ums_wdt=1        (default) start the watchdog (rc2_wdt_ms) before
  *                        the console restart: U-Boot feeds it while it
  *                        runs, a hang resets the book (bootcount + 1, then
- *                        autoboot). It stays running afterwards.
+ *                        autoboot). It stays running afterwards: the
+ *                        dw-wdt cannot be stopped, so "setenv rc2_wdt 0"
+ *                        in the same U-Boot run has no effect. rc2_ums
+ *                        says so when ums ends, and rc2_prep warns when
+ *                        it boots with rc2_wdt != 1 and WDT_CR.WDT_EN set.
  *   rc2_ums_acmwait=SECS (default 60) after the restart wait that long for a
  *                        key on the console; none: run rc2_ums_noacm
  *                        (default "boot"). 0: no wait.
@@ -96,7 +103,12 @@
 		"rc2.part=${rc2_part} rc2.bootcount=${bootcount}\"; " \
 		"if test \"${rc2_wdt}\" = 1; then " \
 		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; " \
-		"else true; fi\0" \
+		"else run rc2_wdt_state; " \
+		"if test \"${rc2_wdt_on}\" = 1; then echo \"rc2: watchdog already " \
+		"running (rc2_ums_wdt), rc2_wdt 0 has no effect until a reset\"; " \
+		"fi; true; fi\0" \
+	"rc2_wdt_state=setenv rc2_wdt_on 0; if wdt dev watchdog@2004c000; then " \
+		"setexpr.l rc2_wdt_on *0x2004c000 % 2; else true; fi\0" \
 	"rc2_boot=echo rc2: slot ${rc2_slot}; run rc2_load && run rc2_prep && " \
 		"bootz ${kernel_addr_r} ${rc2_rd} ${fdt_addr_r}\0" \
 	"rc2_bootcmd=setenv rc2_slot b; run rc2_boot; " \
@@ -113,6 +125,9 @@
 		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; fi; " \
 		"setenv stdin serial,usbacm; setenv stdout serial,usbacm; " \
 		"setenv stderr serial,usbacm; echo rc2: ums ended; " \
+		"run rc2_wdt_state; if test \"${rc2_wdt_on}\" = 1; then " \
+		"echo \"rc2: watchdog armed (rc2_ums_wdt), rc2_wdt 0 has no " \
+		"effect until a reset\"; fi; " \
 		"if rc2_acmwait ${rc2_ums_acmwait}; then true; " \
 		"else run rc2_ums_noacm; fi\0" \
 	"preboot=if itest.l *0x7fff6010 == 0x52325553 && " \
