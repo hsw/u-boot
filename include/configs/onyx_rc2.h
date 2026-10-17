@@ -12,12 +12,31 @@
  * "else true": the old hush gives an "if" without a taken branch the
  * condition's status, which would fail "run rc2_load" / "run rc2_prep".
  *
+ * "run rc2_ums" exports the card over USB mass storage until the host
+ * ejects it, then brings the CDC ACM console back:
+ *   rc2_ums_dcache=off   ums with the D-cache (and MMU) off: ~1 MiB/s, the
+ *                        fallback; default on. "dcache on" follows ums.
+ *   rc2_ums_then=CMDS    run right after ums returns, before the console
+ *                        goes back to usbacm (e.g. "boot")
+ *   rc2_ums_wdt=1        (default) start the watchdog (rc2_wdt_ms) before
+ *                        the console restart: U-Boot feeds it while it
+ *                        runs, a hang resets the book (bootcount + 1, then
+ *                        autoboot). It stays running afterwards.
+ *   rc2_ums_acmwait=SECS (default 60) after the restart wait that long for a
+ *                        key on the console; none: run rc2_ums_noacm
+ *                        (default "boot"). 0: no wait.
+ * "rc2_ustat" keeps the ums counters at 0x7fff6100 and a USB event trace at
+ * 0x7fff6200-0x7fff6fff (board file). The DDR request path (preboot) runs
+ * ums without the watchdog and the wait, then resets as before.
+ *
  * Words in DDR (inside the kernel's no-map loader-log@7ffc0000, above the
  * stage2 pages 0x7fff0000-0x7fff4fff):
  *   0x7fff6000/04  bootcount + magic 0xb001c041 (BOOTCOUNT_GENERIC); Linux
  *                  clears it after a good boot: devmem 0x7fff6000 32 0
  *   0x7fff6010/14  0x52325553 / 0xadcdaaac: "export the card over USB mass
  *                  storage on the next boot" (one shot, cleared by preboot)
+ *   0x7fff6100-2b  ums counters (rc2_ustat, board file)
+ *   0x7fff6200-0x7fff6fff  USB event trace (rc2_ustat, board file)
  */
 
 #ifndef __CONFIG_H
@@ -39,6 +58,10 @@
 	"rc2_wdt=1\0" \
 	"rc2_wdt_ms=15000\0" \
 	"rc2_wdt_dt=1\0" \
+	"rc2_ums_dcache=on\0" \
+	"rc2_ums_wdt=1\0" \
+	"rc2_ums_acmwait=60\0" \
+	"rc2_ums_noacm=boot\0" \
 	"rc2_args=console=ttyGS0,115200 loglevel=8 ignore_loglevel " \
 		"clk_ignore_unused softlockup_panic=1 hung_task_panic=1 " \
 		"rc2ml.savelog=1\0" \
@@ -71,11 +94,20 @@
 		"setenv rc2_slot a; run rc2_boot; echo rc2: slot a failed\0" \
 	"rc2_ums=echo rc2: microSD over USB mass storage, eject on the host to end; " \
 		"setenv stdin serial; setenv stdout serial; setenv stderr serial; " \
-		"ums 0 mmc 0; " \
+		"rc2_ustat start; " \
+		"if test \"${rc2_ums_dcache}\" = off; then dcache off; fi; " \
+		"ums 0 mmc 0; dcache on; rc2_ustat save; " \
+		"if test -n \"${rc2_ums_then}\"; then run rc2_ums_then; fi; " \
+		"if test \"${rc2_ums_wdt}\" = 1; then " \
+		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; fi; " \
 		"setenv stdin serial,usbacm; setenv stdout serial,usbacm; " \
-		"setenv stderr serial,usbacm; echo rc2: ums ended\0" \
+		"setenv stderr serial,usbacm; echo rc2: ums ended; " \
+		"if rc2_acmwait ${rc2_ums_acmwait}; then true; " \
+		"else run rc2_ums_noacm; fi\0" \
 	"preboot=if itest.l *0x7fff6010 == 0x52325553 && " \
 		"itest.l *0x7fff6014 == 0xadcdaaac; then " \
-		"mw.l 0x7fff6010 0 2; dcache flush; run rc2_ums; reset; fi\0"
+		"mw.l 0x7fff6010 0 2; dcache flush; " \
+		"setenv rc2_ums_wdt 0; setenv rc2_ums_acmwait 0; " \
+		"run rc2_ums; reset; fi\0"
 
 #endif

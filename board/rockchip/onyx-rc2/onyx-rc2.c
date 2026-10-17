@@ -22,6 +22,8 @@
  * (board/rockchip/boox-c67ml/boox-c67ml.c), same SoC.
  */
 
+#include <command.h>
+#include <console.h>
 #include <cpu_func.h>
 #include <dm.h>
 #include <env.h>
@@ -29,6 +31,8 @@
 #include <iomux.h>
 #include <stdio.h>
 #include <sysreset.h>
+#include <time.h>
+#include <watchdog.h>
 #include <asm/global_data.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -36,6 +40,8 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/usb/gadget.h>
+#include <usb/dwc2_udc.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -175,6 +181,213 @@ void board_quiesce_devices(void)
 	rc2_remap_off();
 	rc2_led(false);
 }
+
+/* ---- ums and USB diagnostics ---------------------------------------- */
+
+/*
+ * Two blocks in DDR that survive a warm reset, a watchdog reset and the
+ * pinhole, readable from U-Boot (md.l) or a slot kernel (devmem); each
+ * write is cleaned to DDR at once, so a hang loses nothing.
+ *
+ * 0x7fff6100, "rc2_ustat start|save" around ums, little endian words:
+ *   0 magic 0x54534d55 ("UMST")   1 state: 1 ums running, 2 ums returned
+ *   2 settings: bit 0 rc2_ums_dcache != off, bit 1 rc2_ums_wdt = 1
+ *   3.. struct dwc2_udc_diag: in_compl, in_bytes, ahberr, timeout,
+ *       intknepmis, txfundrn, bna, gahbcfg (8 words)
+ *
+ * 0x7fff6200-0x7fff6fff, USB event trace (usb_gadget_trace()), started by
+ * "rc2_ustat start" and kept for that boot and the next one (the boot after
+ * a watchdog reset or pinhole), then off until the next start. Header of 16
+ * words, then RC2_UTRACE_CAP entries of 4 words (event | aux << 8, ms since
+ * boot, a, b; USB_TRACE_* in linux/usb/gadget.h, board events below); when
+ * full, later events only count. The ACM data path is counted, and logged
+ * only for the first few after each SET_INTERFACE/set_alt or on an error.
+ */
+#define RC2_USTAT		0x7fff6100
+#define RC2_USTAT_MAGIC		0x54534d55
+#define RC2_USTAT_WORDS		(3 + 8)
+#define RC2_UTRACE		0x7fff6200
+#define RC2_UTRACE_MAGIC	0x43525455	/* "UTRC" */
+#define RC2_UTRACE_END		0x7fff7000
+#define RC2_UTRACE_HDR		16
+#define RC2_UTRACE_CAP		((RC2_UTRACE_END - RC2_UTRACE - 4 * RC2_UTRACE_HDR) / 16)
+
+enum {	/* trace header words */
+	UT_MAGIC, UT_N, UT_CAP, UT_BOOTS,	/* events offered; capacity; boots left */
+	UT_TXQ, UT_TXDONE, UT_TXERR, UT_RXDONE, UT_RXBYTES, UT_RXERR,
+	UT_LINESTATE,				/* last SET_CONTROL_LINE_STATE */
+	UT_HEARTBEAT,				/* rc2_acmwait: +1 every 100 ms */
+	UT_LAST_MS,				/* time of the last event */
+};
+
+enum {	/* board events */
+	RC2_TRACE_BOOT = USB_TRACE_BOARD,	/* first event of a later boot; a: bootcount */
+	RC2_TRACE_USTAT_START,			/* a: settings */
+	RC2_TRACE_USTAT_SAVE,			/* a: in_compl, b: in_bytes */
+	RC2_TRACE_ACMWAIT,			/* a: seconds */
+	RC2_TRACE_ACMWAIT_END,			/* a: 1 key, 0 timeout; b: ms */
+};
+
+/* 0 not decided yet in this boot, 1 recording, -1 off */
+static int rc2_utrace_state;
+static unsigned int rc2_utrace_burst;
+
+static void rc2_clean(ulong a, ulong len)
+{
+	ulong s = a & ~(ulong)(CONFIG_SYS_CACHELINE_SIZE - 1);
+
+	flush_dcache_range(s, ALIGN(a + len, CONFIG_SYS_CACHELINE_SIZE));
+}
+
+static void rc2_utrace_log(u32 *h, unsigned int ev, u32 a, u32 b)
+{
+	u32 n = h[UT_N]++;
+	u32 *e = (u32 *)(RC2_UTRACE + 4 * RC2_UTRACE_HDR) + 4 * n;
+
+	if (n < RC2_UTRACE_CAP) {
+		e[0] = ev;
+		e[1] = get_timer(0);
+		e[2] = a;
+		e[3] = b;
+		rc2_clean((ulong)e, 16);
+	}
+}
+
+void usb_gadget_trace(unsigned int ev, u32 a, u32 b)
+{
+	u32 *h = (u32 *)RC2_UTRACE;
+	bool log = true;
+
+	if (!rc2_utrace_state) {
+		rc2_utrace_state = -1;
+		if (h[UT_MAGIC] == RC2_UTRACE_MAGIC && h[UT_BOOTS] &&
+		    h[UT_CAP] == RC2_UTRACE_CAP) {
+			h[UT_BOOTS]--;
+			rc2_utrace_state = 1;
+			rc2_utrace_log(h, RC2_TRACE_BOOT, *(u32 *)0x7fff6000, 0);
+		}
+	}
+	if (rc2_utrace_state < 0)
+		return;
+
+	switch (ev & 0xff) {
+	case USB_TRACE_ACM_SET_ALT:
+		rc2_utrace_burst = 0;
+		break;
+	case USB_TRACE_ACM_LINE_STATE:
+		h[UT_LINESTATE] = a;
+		break;
+	case USB_TRACE_ACM_TX_QUEUE:
+		h[UT_TXQ]++;
+		h[UT_TXERR] += !!b;
+		log = b || rc2_utrace_burst++ < 4;
+		break;
+	case USB_TRACE_ACM_TX_DONE:
+		h[UT_TXDONE]++;
+		h[UT_TXERR] += !!a;
+		log = a || rc2_utrace_burst++ < 4;
+		break;
+	case USB_TRACE_ACM_RX_DONE:
+		h[UT_RXDONE]++;
+		h[UT_RXBYTES] += b;
+		h[UT_RXERR] += !!a;
+		log = a || rc2_utrace_burst++ < 4;
+		break;
+	}
+	if (log)
+		rc2_utrace_log(h, ev, a, b);
+	h[UT_LAST_MS] = get_timer(0);
+	rc2_clean((ulong)h, 4 * RC2_UTRACE_HDR);
+}
+
+static u32 rc2_ustat_cfg;
+
+static void rc2_ustat_write(u32 state)
+{
+	u32 *w = (u32 *)RC2_USTAT;
+
+	w[0] = RC2_USTAT_MAGIC;
+	w[1] = state;
+	w[2] = rc2_ustat_cfg;
+	memcpy(&w[3], &dwc2_udc_diag, 8 * sizeof(u32));
+	rc2_clean(RC2_USTAT, 4 * RC2_USTAT_WORDS);
+}
+
+static int do_rc2_ustat(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	struct dwc2_udc_diag *d = &dwc2_udc_diag;
+	const char *dc = env_get("rc2_ums_dcache");
+	u32 *h = (u32 *)RC2_UTRACE;
+
+	if (argc != 2)
+		return CMD_RET_USAGE;
+	if (!strcmp(argv[1], "start")) {
+		memset(d, 0, sizeof(*d));
+		rc2_ustat_cfg = (dc && !strcmp(dc, "off") ? 0 : 1) |
+				(env_get_yesno("rc2_ums_wdt") == 1) << 1;
+		rc2_ustat_write(1);
+		memset(h, 0, 4 * RC2_UTRACE_HDR);
+		h[UT_MAGIC] = RC2_UTRACE_MAGIC;
+		h[UT_CAP] = RC2_UTRACE_CAP;
+		h[UT_BOOTS] = 1;
+		rc2_utrace_state = 1;
+		usb_gadget_trace(RC2_TRACE_USTAT_START, rc2_ustat_cfg, 0);
+		return 0;
+	}
+	if (!strcmp(argv[1], "save")) {
+		rc2_ustat_write(2);
+		usb_gadget_trace(RC2_TRACE_USTAT_SAVE, d->in_compl, d->in_bytes);
+		printf("rc2: ums stats (settings %#x): IN compl %u bytes %u; ahberr %u timeout %u "
+		       "intknepmis %u txfundrn %u bna %u; gahbcfg %#x\n", rc2_ustat_cfg,
+		       d->in_compl, d->in_bytes, d->ahberr, d->timeout, d->intknepmis,
+		       d->txfundrn, d->bna, d->gahbcfg);
+		return 0;
+	}
+	return CMD_RET_USAGE;
+}
+
+U_BOOT_CMD(rc2_ustat, 2, 0, do_rc2_ustat,
+	   "ums diagnostics: counters to DDR 0x7fff6100, USB trace at 0x7fff6200",
+	   "start - clear the counters, start the USB trace (this boot and the next)\n"
+	   "rc2_ustat save - write the counters to DDR and print them");
+
+/*
+ * "rc2_acmwait SECS": wait up to SECS seconds for a key on the console (the
+ * ACM port after ums): 0 = a key came (or SECS is 0), 1 = none. While it
+ * waits, U-Boot services the gadget and feeds a running watchdog.
+ */
+static int do_rc2_acmwait(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	ulong secs = argc > 1 ? dectoul(argv[1], NULL) : 0;
+	ulong start = get_timer(0), beat = start;
+	u32 *h = (u32 *)RC2_UTRACE;
+
+	if (!secs)
+		return 0;
+	printf("rc2: press a key on the console within %lu s (else: run rc2_ums_noacm)\n", secs);
+	usb_gadget_trace(RC2_TRACE_ACMWAIT, secs, 0);
+	while (get_timer(start) < secs * 1000) {
+		if (tstc()) {
+			getchar();
+			usb_gadget_trace(RC2_TRACE_ACMWAIT_END, 1, get_timer(start));
+			puts("rc2: console ok\n");
+			return 0;
+		}
+		if (get_timer(beat) >= 100 && rc2_utrace_state > 0) {
+			beat = get_timer(0);
+			h[UT_HEARTBEAT]++;
+			rc2_clean((ulong)h, 4 * RC2_UTRACE_HDR);
+		}
+		schedule();
+	}
+	usb_gadget_trace(RC2_TRACE_ACMWAIT_END, 0, get_timer(start));
+	puts("rc2: no key on the console\n");
+	return 1;
+}
+
+U_BOOT_CMD(rc2_acmwait, 2, 0, do_rc2_acmwait,
+	   "wait for a key on the console",
+	   "SECS - 0: a key came within SECS seconds (or SECS is 0), 1: none");
 #endif
 
 /* ---- reset ---------------------------------------------------------- */
