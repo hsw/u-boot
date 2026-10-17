@@ -488,6 +488,45 @@ static void process_ep_out_intr(struct dwc2_udc *dev)
 }
 
 /*
+ * USB bus reset: what the Linux dwc2 gadget (dwc2_hsotg_core_init_disconnected()
+ * with is_usb_reset) and the Rockchip vendor code do. The core keeps its
+ * configuration and FIFO layout from udc_enable(); only the device address,
+ * the endpoints and the FIFOs are cleared, and EP0 waits for a SETUP again.
+ *
+ * The driver used to run reconfig_usbd() here, which soft-resets the core
+ * (GRSTCTL.CSftRst) and soft-disconnects for 20 us while the host is still
+ * driving the reset: the core then misses the high-speed handshake, reports
+ * full speed at ENUMDONE, and the next reset starts the same again.
+ */
+static void dwc2_udc_bus_reset(struct dwc2_udc *dev)
+{
+	int i;
+
+	clrbits_le32(&reg->device_regs.dcfg, DCFG_DEVADDR_MASK);
+	dev->usb_address = 0;
+
+	for (i = 0; i < DWC2_MAX_ENDPOINTS; i++) {
+		u32 doepctl = readl(&reg->device_regs.out_endp[i].doepctl);
+		u32 diepctl = readl(&reg->device_regs.in_endp[i].diepctl);
+
+		/* EP0 stays enabled; other endpoints stop until set_alt */
+		if (i && (doepctl & DXEPCTL_EPENA))
+			doepctl |= DXEPCTL_EPDIS;
+		if (i && (diepctl & DXEPCTL_EPENA))
+			diepctl |= DXEPCTL_EPDIS;
+		writel(doepctl | DXEPCTL_SNAK, &reg->device_regs.out_endp[i].doepctl);
+		writel(diepctl | DXEPCTL_SNAK, &reg->device_regs.in_endp[i].diepctl);
+	}
+
+	dwc2_flush_tx_fifo(reg, GRSTCTL_TXFNUM_ALL);
+	dwc2_flush_rx_fifo(reg);
+
+	writel(FIELD_PREP(DAINT_OUTEP_MASK, BIT(EP0_CON)) |
+	       FIELD_PREP(DAINT_INEP_MASK, BIT(EP0_CON)),
+	       &reg->device_regs.daintmsk);
+}
+
+/*
  *	usb client interrupt handler.
  */
 static int dwc2_udc_irq(int irq, void *_dev)
@@ -589,23 +628,13 @@ static int dwc2_udc_irq(int irq, void *_dev)
 			"\tReset interrupt - (GOTGCTL):0x%x\n", usb_status);
 		writel(GINTSTS_USBRST, &reg->global_regs.gintsts);
 
-		usb_gadget_trace(USB_TRACE_USBRST,
-				 !(usb_status & (GOTGCTL_ASESVLD | GOTGCTL_BSESVLD)) ? 2 :
-				 reset_available ? 0 : 1, usb_status);
 		if (usb_status & (GOTGCTL_ASESVLD | GOTGCTL_BSESVLD)) {
-			if (reset_available) {
-				debug_cond(DEBUG_ISR,
-					"\t\tOTG core got reset (%d)!!\n",
-					reset_available);
-				reconfig_usbd(dev);
-				dev->ep0state = WAIT_FOR_SETUP;
-				reset_available = 0;
-				dwc2_udc_pre_setup();
-			} else
-				reset_available = 1;
-
+			usb_gadget_trace(USB_TRACE_USBRST, 3, usb_status);
+			dwc2_udc_bus_reset(dev);
+			dev->ep0state = WAIT_FOR_SETUP;
+			dwc2_udc_pre_setup();
 		} else {
-			reset_available = 1;
+			usb_gadget_trace(USB_TRACE_USBRST, 2, usb_status);
 			debug_cond(DEBUG_ISR,
 				   "\t\tRESET handling skipped\n");
 		}
@@ -785,7 +814,8 @@ static int dwc2_fifo_read(struct dwc2_ep *ep, void *cp, int max)
  */
 static void udc_set_address(struct dwc2_udc *dev, unsigned char address)
 {
-	setbits_le32(&reg->device_regs.dcfg, FIELD_PREP(DCFG_DEVADDR_MASK, address));
+	clrsetbits_le32(&reg->device_regs.dcfg, DCFG_DEVADDR_MASK,
+			FIELD_PREP(DCFG_DEVADDR_MASK, address));
 
 	dwc2_udc_ep0_zlp(dev);
 
@@ -1389,9 +1419,6 @@ static void dwc2_ep0_setup(struct dwc2_udc *dev)
 				   "%s: USB_REQ_SET_CONFIGURATION (%d)\n",
 				   __func__, usb_ctrl->wValue);
 
-			if (usb_ctrl->bRequestType == USB_RECIP_DEVICE)
-				reset_available = 1;
-
 			break;
 
 		case USB_REQ_GET_DESCRIPTOR:
@@ -1404,9 +1431,6 @@ static void dwc2_ep0_setup(struct dwc2_udc *dev)
 			debug_cond(DEBUG_SETUP != 0,
 				   "%s: *** USB_REQ_SET_INTERFACE (%d)\n",
 				   __func__, usb_ctrl->wValue);
-
-			if (usb_ctrl->bRequestType == USB_RECIP_INTERFACE)
-				reset_available = 1;
 
 			break;
 

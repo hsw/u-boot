@@ -88,7 +88,6 @@ static const char ep0name[] = "ep0-control";
 static unsigned int ep0_fifo_size = 64;
 static unsigned int ep_fifo_size =  512;
 static unsigned int ep_fifo_size2 = 1024;
-static int reset_available = 1;
 
 static struct usb_ctrlrequest *usb_ctrl;
 static dma_addr_t usb_ctrl_dma_addr;
@@ -230,7 +229,6 @@ static int udc_enable(struct dwc2_udc *dev)
 	usb_gadget_trace(USB_TRACE_UDC_START, 0, 0);
 
 	/* a new gadget (e.g. ACM after ums): no state of the previous one */
-	reset_available = 1;
 	clear_feature_flag = 0;
 
 	otg_phy_init(dev);
