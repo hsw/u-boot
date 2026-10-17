@@ -296,6 +296,17 @@ static void acm_rx_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_acm *f_acm = req->context;
 
+	/*
+	 * An error status means the UDC is taking the request back: the
+	 * endpoint is being disabled (reset_config() on a SET_CONFIGURATION
+	 * of a configured device, or a disconnect) or the request was
+	 * dequeued. Queueing it again here would put it back on the queue
+	 * the UDC is emptying; dwc2's nuke() would then complete and requeue
+	 * the same request forever. acm_disable() frees it.
+	 */
+	if (req->status)
+		return;
+
 	buf_push(&f_acm->rx_buf, req->buf, req->actual);
 
 	/* Queue RX req again */
