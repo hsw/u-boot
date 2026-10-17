@@ -5,6 +5,7 @@
 
 #include <clk.h>
 #include <dm.h>
+#include <limits.h>
 #include <reset.h>
 #include <wdt.h>
 #include <asm/io.h>
@@ -26,16 +27,22 @@ struct designware_wdt_priv {
 
 /*
  * Set the watchdog time interval.
- * Counter is 32 bit.
+ * TOP i gives a period of 2^(16 + i) clock cycles, i = 0..15; pick the
+ * shortest period that is not shorter than the timeout, or the longest one.
  */
 static int designware_wdt_settimeout(void __iomem *base, unsigned int clk_khz,
-				     unsigned int timeout)
+				     u64 timeout)
 {
-	signed int i;
+	u64 cycles;
+	int i;
 
-	/* calculate the timeout range value */
-	i = fls(timeout * clk_khz - 1) - 16;
-	i = clamp(i, 0, 15);
+	/* calculate the timeout range value, in 64 bits: ms * kHz overflows 32 */
+	if (timeout > U64_MAX / clk_khz)
+		cycles = U64_MAX;
+	else
+		cycles = timeout * clk_khz;
+	for (i = 0; i < 15 && (1ULL << (16 + i)) < cycles; i++)
+		;
 
 	writel(i | (i << 4), base + DW_WDT_TORR);
 
