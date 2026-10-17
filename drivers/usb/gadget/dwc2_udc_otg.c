@@ -226,6 +226,10 @@ static int udc_enable(struct dwc2_udc *dev)
 {
 	debug_cond(DEBUG_SETUP != 0, "%s: %p\n", __func__, dev);
 
+	/* a new gadget (e.g. ACM after ums): no state of the previous one */
+	reset_available = 1;
+	clear_feature_flag = 0;
+
 	otg_phy_init(dev);
 	reconfig_usbd(dev);
 
