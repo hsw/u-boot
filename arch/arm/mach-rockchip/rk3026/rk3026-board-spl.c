@@ -17,6 +17,7 @@
  * CFG_SYS_TIMER_COUNTER / CFG_SYS_TIMER_RATE / CONFIG_SYS_TIMER_COUNTS_DOWN.
  */
 
+#include <cpu_func.h>
 #include <debug_uart.h>
 #include <init.h>
 #include <asm/io.h>
@@ -538,6 +539,20 @@ static void boox_counter_probe(void)
 
 void board_init_f(ulong dummy)
 {
+	/*
+	 * The Cortex-A9 does not invalidate its caches on reset. After a warm
+	 * reset (GLB_SRST, watchdog) from a kernel that did not clean them, L1
+	 * still holds that kernel's valid and dirty lines. cpu_init_cp15 has
+	 * invalidated the TLBs, the I-cache and the branch predictor; drop the
+	 * D-cache lines too (invalidate by set/way, no clean: nothing here has
+	 * enabled the D-cache), before any later stage turns the D-cache on
+	 * and hits them or writes them back over the image the mask ROM loads
+	 * next. U-Boot proper invalidates before its own MMU setup, but a
+	 * stage that enables the D-cache without that (a kernel's
+	 * decompressor does not invalidate) would run into them.
+	 */
+	invalidate_dcache_all();
+
 	/*
 	 * LED first, before any other peripheral is touched.  It is the only
 	 * output we have, so anything that can hang -- a gated timer block, the
