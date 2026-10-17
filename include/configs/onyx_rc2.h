@@ -44,6 +44,17 @@
 
 #include <configs/rk3026_common.h>
 
+#ifdef CONFIG_XPL_BUILD
+/*
+ * SPL timebase (onyx_rc2_mspl_defconfig only): the A9 global timer through
+ * lib/time.c's pre-driver-model path, at the mask ROM's clocks (CORE_PERI =
+ * 24 MHz / 4, measured in the SPL on the same SoC, include/configs/
+ * boox_c67ml.h). Valid only while the SPL leaves the PLLs alone.
+ */
+#define CFG_SYS_TIMER_COUNTER	0x1013c200
+#define CFG_SYS_TIMER_RATE	6000000
+#endif
+
 #undef CFG_EXTRA_ENV_SETTINGS
 #define CFG_EXTRA_ENV_SETTINGS \
 	"stdout=serial,usbacm\0" \
