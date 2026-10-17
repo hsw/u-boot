@@ -110,8 +110,8 @@ int board_early_init_f(void)
 	/*
 	 * Watchdog: pclk_wdt on (CLKGATE_CON7 bit 15) and SRST_WDT released
 	 * (SOFTRST_CON5 bit 6), as stage2's wdt_arm(). The DT node carries no
-	 * "resets": the rk3026-cru.h reset ids in this tree do not follow the
-	 * 16 * register + bit numbering the Rockchip reset driver decodes.
+	 * "resets" (SRST_WDT = 86 since the 16 * CON + bit renumbering), so
+	 * the watchdog driver never pulses the reset; the board releases it.
 	 * Nothing here enables the watchdog; "wdt start" in the boot script does.
 	 */
 	writel(BIT(15 + 16), (void __iomem *)CRU_CLKGATE_CON7);
