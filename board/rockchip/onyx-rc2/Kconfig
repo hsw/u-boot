@@ -10,25 +10,34 @@ config SYS_CONFIG_NAME
 	default "onyx_rc2"
 
 config RC2_RESET_METHOD
-	string "Default reset method (fst, snd or core)"
-	default "fst"
+	string "Default reset method (core, fst or snd)"
+	default "core"
 	help
 	  How the "reset" command (and anything else that asks the sysreset
 	  uclass for a reset) resets the RK3026. The environment variable
 	  rc2_reset overrides it at run time, so the device test can try
 	  every method without a rebuild.
 
-	  fst:  CRU_GLB_SRST_FST_VALUE = 0xfdb9 (first global reset). On the
-	        book after a mainline "reboot" it ran ROM -> FlashData ->
-	        stage2 from the SD again (2026-10-17).
-	  snd:  CRU_GLB_SRST_SND_VALUE = 0xeca8 (second global reset; keeps
-	        the GRF; mainline "reboot" with it hangs the board).
 	  core: the stock 3.0 kernel's way, from IMEM: all PLLs to slow
 	        mode, then SOFTRST_CON0 = 0x801cffff (MCORE, CORE0, CORE1,
-	        L2C). The stock kernel's reboot from SD lands on the SD.
+	        L2C). The GPIO banks, the GRF, IMEM and the DDR controller
+	        keep their state, so the ACT8931 power hold (GPIO1_A2) stays
+	        up: on battery the book restarts (U-Boot "reset" with the
+	        cable pulled: Linux back 9 s later, pstore kept; 2026-10-18).
+	        The stock kernel's reboot from SD lands on the SD.
+	  fst:  CRU_GLB_SRST_FST_VALUE = 0xfdb9 (first global reset). On the
+	        book after a mainline "reboot" it ran ROM -> FlashData ->
+	        stage2 from the SD again (2026-10-17). Resets the GPIO banks
+	        (2026-10-18): on battery the power hold drops and the book
+	        switches off. After it the host did not see U-Boot's ACM
+	        port again.
+	  snd:  CRU_GLB_SRST_SND_VALUE = 0xeca8 (second global reset; keeps
+	        the GRF, resets the GPIO banks like fst: on battery the book
+	        switches off, 2026-10-18).
 
 	  Every method first cleans and disables the caches and clears the
-	  IMEM remap. Which of them brings the BootROM back to the microSD
-	  card from U-Boot is a device test item.
+	  IMEM remap. With the cable in all three bring the BootROM back to
+	  the microSD card; on battery only core does (book rounds of
+	  2026-10-17 and 2026-10-18).
 
 endif
