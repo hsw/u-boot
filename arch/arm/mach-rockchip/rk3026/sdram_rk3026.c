@@ -13,6 +13,8 @@
  *
  * Timings, PLL and register writes below are transcribed from the vendor DDR
  * init blob (load base 0x10080800), which runs this board's DDR at 300 MHz.
+ * CONFIG_RK3026_DDR_396MHZ swaps in the 396 MHz set the ONYX RC2's vendor
+ * kernel switches to after boot; the init sequence stays the blob's.
  */
 #include <config.h>
 #include <init.h>
@@ -59,6 +61,55 @@ struct rk3026_sdram_priv {
 };
 
 /*
+ * PHY words that depend on the table's frequency, besides the timings.
+ * reg2a_low: DLL register 0x2b0 bits [1:0] (undocumented; the vendor kernel
+ *            sets both whenever the DLLs are on, the vendor DDR init blob
+ *            leaves them 0).
+ * dq_drv / dq_odt: DQ drive (0x080/0x084) and DQ ODT (0x088/0x08c), raw
+ *            pull-up/pull-down nibbles.
+ * dqs_odt:   DQS ODT (0x0e4/0x124); 0 leaves the reset value (0x0d, off).
+ */
+struct rk3026_ddr_phy_cfg {
+	u32 reg2a_low;
+	u32 dq_drv;
+	u32 dq_odt;
+	u32 dqs_odt;
+};
+
+#if IS_ENABLED(CONFIG_RK3026_DDR_396MHZ)
+/*
+ * integer mode, dpll output 792MHz and ddr get 396MHz
+ * refdiv, fbdiv, postdiv1, postdiv2 (DPLL_CON0 0x2042, as the vendor kernel)
+ */
+const struct pll_div dpll_init_cfg = {1, 66, 2, 1};
+
+/*
+ * 396MHz ddr timing: the set the ONYX RC2's vendor 3.0 kernel runs, read
+ * back from the controller of a running book (PCTL 0x0c0-0x144, NoC
+ * DdrTiming), and equal word for word to its ddr_get_parameter(396) for
+ * this die (DDR3, 4 Gbit, CL 6, CWL 5).  The mode registers cannot be read
+ * back; they are the kernel's: MR0 CL 6, WR 6, BL8; MR1 drive 40 ohm,
+ * Rtt_Nom 120 ohm; MR2 CWL 5.  All timings are at or above the Samsung
+ * K4B4G1646E datasheet minimums at a 2.525 ns clock (tRAS 15 >= 14,
+ * tRC 21 >= 20, tRFC 119 >= 103, tWR 6 >= 6).
+ */
+const struct rk3026_ddr_timing ddr_timing = {0x18c,
+	{0x18c, 0xc8, 0x1f4, 0x27, 0x4e,
+	0x4, 0x77, 0x06, 0x03, 0x0, 0x06, 0x05, 0x0f, 0x15, 0x06, 0x04, 0x04,
+	0x06, 0x04, 0x200, 0x03, 0x0a, 0x40, 0x2710, 0x01, 0x05, 0x05, 0x03,
+	0x0c, 0x28, 0x100, 0x0, 0x04, 0x0},
+	{{0x420, 0x40, 0x0, 0x0}, 0x01, 0x60},
+	{0x24717315} };
+
+/* the vendor kernel's PHY setting above 333MHz: 45 ohm drive, ODT on */
+const struct rk3026_ddr_phy_cfg ddr_phy_cfg = {
+	.reg2a_low = 0x03,
+	.dq_drv = 0x77,
+	.dq_odt = 0x88,
+	.dqs_odt = 0x0e,
+};
+#else
+/*
  * integer mode, dpll output 600MHz and ddr get 300MHz
  * refdiv, fbdiv, postdiv1, postdiv2
  */
@@ -72,6 +123,19 @@ const struct rk3026_ddr_timing ddr_timing = {0x12c,
 	0x0c, 0x1e, 0x100, 0x0, 0x04, 0x0},
 	{{0x220, 0x42, 0x0, 0x0}, 0x01, 0x60},
 	{0x24716310} };
+
+/*
+ * The vendor blob's PHY setting: DQ drive 0xbb, DQ ODT 216 ohm, DQS ODT
+ * left at reset.  Raw nibbles, not ohm values - the nibble-to-ohm table is
+ * only in third-party source and is not corroborated by any binary.
+ */
+const struct rk3026_ddr_phy_cfg ddr_phy_cfg = {
+	.reg2a_low = 0,
+	.dq_drv = 0xbb,
+	.dq_odt = 0x44,
+	.dqs_odt = 0,
+};
+#endif
 
 /*
  * [7:6]  bank(n:n bit bank)
@@ -243,7 +307,6 @@ enum {
 
 /* GRF_SOC_CON2 */
 #define	MSCH4_MAINDDR3		(1 << 7)
-#define PHY_DRV_ODT_SET(n)	((n << 4) | n)
 #define DDR3_DLL_RESET		(1 << 8)
 
 /* CK pull up/down driver strength control */
@@ -454,7 +517,8 @@ void phy_dll_bypass_set(struct rk3026_sdram_priv *priv, unsigned int freq)
 			&ddr_phy->ddrphy_reg9);
 	} else {
 		writel(CMD_DLL_BYPASS_DISABLE | HIGH_8BIT_DLL_BYPASS_DISABLE |
-			LOW_8BIT_DLL_BYPASS_DISABLE, &ddr_phy->ddrphy_reg2a);
+			LOW_8BIT_DLL_BYPASS_DISABLE | ddr_phy_cfg.reg2a_low,
+			&ddr_phy->ddrphy_reg2a);
 
 		writel(LEFT_CHN_TX_DQ_PHASE_BYPASS_0 |
 			LEFT_CHN_TX_DQ_DLL_ENABLE |
@@ -691,17 +755,17 @@ static void phy_cfg(struct rk3026_sdram_priv *priv)
 	/*
 	 * The CMD/CK drive registers at 0x2000a054 and 0x2000a070 are
 	 * inherited from rk3036; the vendor blob never writes either, so
-	 * leave them at reset.
+	 * leave them at reset (0x77, which is also what the vendor kernel
+	 * writes there at any frequency).
 	 */
-	/*
-	 * DQ drive: the vendor blob writes 0xbb to 0x2000a080/0x2000a084.
-	 * Raw nibble, not an ohm value - the nibble-to-ohm table is only in
-	 * third-party source and is not corroborated by any binary.
-	 */
-	writel(PHY_DRV_ODT_SET(0xb), &ddr_phy->ddrphy_reg25);
-	writel(PHY_DRV_ODT_SET(0xb), &ddr_phy->ddrphy_reg26);
-	writel(PHY_DRV_ODT_SET(PHY_RTT_216OHM), &ddr_phy->ddrphy_reg27);
-	writel(PHY_DRV_ODT_SET(PHY_RTT_216OHM), &ddr_phy->ddrphy_reg28);
+	writel(ddr_phy_cfg.dq_drv, &ddr_phy->ddrphy_reg25);
+	writel(ddr_phy_cfg.dq_drv, &ddr_phy->ddrphy_reg26);
+	writel(ddr_phy_cfg.dq_odt, &ddr_phy->ddrphy_reg27);
+	writel(ddr_phy_cfg.dq_odt, &ddr_phy->ddrphy_reg28);
+	if (ddr_phy_cfg.dqs_odt) {
+		writel(ddr_phy_cfg.dqs_odt, &ddr_phy->ddrphy_reg0e4);
+		writel(ddr_phy_cfg.dqs_odt, &ddr_phy->ddrphy_reg124);
+	}
 }
 
 void dram_cfg_rbc(struct rk3026_sdram_priv *priv)

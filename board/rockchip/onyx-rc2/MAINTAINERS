@@ -3,5 +3,7 @@ S:	Maintained
 F:	board/rockchip/onyx-rc2
 F:	include/configs/onyx_rc2.h
 F:	configs/onyx_rc2_defconfig
+F:	configs/onyx_rc2_mspl_defconfig
+F:	configs/onyx_rc2_mspl_ddr396_defconfig
 F:	arch/arm/dts/rk3026-onyx-rc2.dts
 F:	arch/arm/dts/rk3026-onyx-rc2-u-boot.dtsi

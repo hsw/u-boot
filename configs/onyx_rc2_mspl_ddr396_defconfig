@@ -1,0 +1,3 @@
+#include <configs/onyx_rc2_mspl_defconfig>
+
+CONFIG_RK3026_DDR_396MHZ=y

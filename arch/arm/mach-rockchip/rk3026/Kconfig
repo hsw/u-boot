@@ -53,6 +53,28 @@ config RK3026_SPL_TIMER_STASH
 	  vendor loader's reboot-mode register, so boards that keep the
 	  vendor loader on their internal storage leave this off.
 
+choice
+	prompt "SPL DDR3 clock"
+	depends on SPL
+	default RK3026_DDR_300MHZ
+
+config RK3026_DDR_300MHZ
+	bool "300 MHz"
+	help
+	  DPLL 600 MHz, DDR 300 MHz, with the timing table, mode registers
+	  and PHY drive/ODT of the vendor DDR init blob.
+
+config RK3026_DDR_396MHZ
+	bool "396 MHz (ONYX RC2)"
+	depends on TARGET_ONYX_RC2
+	help
+	  DPLL 792 MHz, DDR 396 MHz, with the timings, mode registers and
+	  PHY drive/ODT the ONYX RC2's vendor kernel runs its DDR3 with
+	  (4 Gbit die, CL 6, CWL 5). Same init sequence as the 300 MHz
+	  set; only the values differ.
+
+endchoice
+
 config SYS_SOC
 	default "rk3026"
 
