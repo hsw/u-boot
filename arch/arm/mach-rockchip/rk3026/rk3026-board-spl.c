@@ -547,6 +547,21 @@ __weak void rk3026_spl_board_init_f(void)
 {
 }
 
+/*
+ * Board hooks around the DDR init. pre_dram runs after the timebase is up and
+ * before the DPLL leaves bypass, i.e. the last point at which every clock is
+ * still the 24 MHz oscillator (the ROM leaves APLL/GPLL in bypass and this SPL
+ * never changes them): a board that has to set a supply voltage first does it
+ * here. post_dram runs once DRAM works.
+ */
+__weak void rk3026_spl_board_pre_dram(void)
+{
+}
+
+__weak void rk3026_spl_board_post_dram(void)
+{
+}
+
 void board_init_f(ulong dummy)
 {
 	rk3026_spl_board_init_f();
@@ -623,6 +638,8 @@ void board_init_f(ulong dummy)
 	 * "Off" is positive proof, since the line is high out of a warm reset and
 	 * nothing else on the board clears it.
 	 */
+	rk3026_spl_board_pre_dram();
+
 	spl_led_init();
 	spl_led(false);
 
@@ -635,6 +652,7 @@ void board_init_f(ulong dummy)
 	sdram_init();
 
 	spl_led(true);
+	rk3026_spl_board_post_dram();
 
 	/* 4: sdram_init() returned. */
 	BOOX_STEP(4);

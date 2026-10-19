@@ -12,7 +12,8 @@
  * Board rules:
  *  - no eMMC / NAND / SDIO node is described, so no driver can reach the
  *    eMMC; the microSD card is the only block device;
- *  - no PMIC access at all (no I2C, no regulator driver);
+ *  - no PMIC access (no I2C, no regulator driver); the mspl SPL's ACT8931
+ *    voltage restore (spl.c) is only reported here, from its DDR record;
  *  - the IMEM remap is cleared at once and never set again: with it set,
  *    a reset restarts CPU0 in IMEM instead of the BootROM;
  *  - nothing above 0x7ff00000 is used by U-Boot (waveform window, ramoops,
@@ -42,6 +43,7 @@
 #include <linux/string.h>
 #include <linux/usb/gadget.h>
 #include <usb/dwc2_udc.h>
+#include "act8931-restore.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -99,6 +101,54 @@ static void rc2_led(bool on)
 		clrbits_le32((void __iomem *)(GPIO2_BASE + GPIO_SWPORTA_DR), LED_BIT);
 }
 
+/*
+ * The SPL's ACT8931 restore record (act8931-restore.h, spl.c): one line per
+ * raised selector, nothing when every selector was at or above its target.
+ * Runs before relocation with the caches off, so the lines land in the
+ * pre-console buffer and reach the ACM console with the banner. The record
+ * stays for Linux, marked as seen. The stage2 chain has no SPL: a record
+ * there is an older boot's and is dropped.
+ */
+static void rc2_act8931_report(void)
+{
+	static const char *const names[RC2_ACT_RAILS] = RC2_ACT_RAIL_NAMES;
+	u32 *rec = (u32 *)RC2_ACT_REC;
+	u32 st, w, err, at;
+	int i;
+
+	if (!IS_ENABLED(CONFIG_SPL)) {
+		if (readl(&rec[0]) == RC2_ACT_MAGIC || readl(&rec[0]) == RC2_ACT_SEEN)
+			writel(0, &rec[0]);
+		return;
+	}
+	if (readl(&rec[0]) != RC2_ACT_MAGIC) {
+		printf("act8931: no voltage restore record from the SPL\n");
+		return;
+	}
+	st = readl(&rec[1]);
+	err = st & 0xff;
+	at = (st >> 12) & 0xf;
+	for (i = 0; i < RC2_ACT_RAILS; i++) {
+		w = readl(&rec[2 + i]);
+		if (!(w & 0xff0000))
+			continue;
+		printf("act8931: %s%s 0x%02x -> 0x%02x%s\n", names[i],
+		       (w & 0xff) < 0x50 && !(w & 1) ? " VSET1" : "",
+		       (w >> 8) & 0xff, (w >> 16) & 0xff,
+		       err && at == i ? " (not confirmed)" : "");
+	}
+	if (err == RC2_ACT_EBUS)
+		printf("act8931: I2C bus held low, voltages not checked; booting on\n");
+	else if (err == RC2_ACT_EXFER && at < RC2_ACT_RAILS)
+		printf("act8931: no answer at %s, restore stopped; booting on\n", names[at]);
+	else if (err == RC2_ACT_EVERIFY && at < RC2_ACT_RAILS)
+		printf("act8931: %s reads 0x%02x after the write, restore stopped; booting on\n",
+		       names[at], readl(&rec[2 + at]) >> 24);
+	else if (err)
+		printf("act8931: restore status %#x; booting on\n", st);
+	writel(RC2_ACT_SEEN, &rec[0]);
+}
+
 int board_early_init_f(void)
 {
 	rc2_remap_off();
@@ -116,6 +166,7 @@ int board_early_init_f(void)
 	 */
 	writel(BIT(15 + 16), (void __iomem *)CRU_CLKGATE_CON7);
 	writel(BIT(6 + 16), (void __iomem *)CRU_SOFTRST_CON5);
+	rc2_act8931_report();
 	return 0;
 }
 
