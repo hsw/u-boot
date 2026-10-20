@@ -17,11 +17,13 @@
 
 #define DW_WDT_CR_EN_OFFSET	0x00
 #define DW_WDT_CR_RMOD_OFFSET	0x01
+#define DW_WDT_CR_RPL_OFFSET	0x02
 #define DW_WDT_CRR_RESTART_VAL	0x76
 
 struct designware_wdt_priv {
 	void __iomem	*base;
 	unsigned int	clk_khz;
+	unsigned int	rpl;
 	struct reset_ctl_bulk resets;
 };
 
@@ -49,9 +51,10 @@ static int designware_wdt_settimeout(void __iomem *base, unsigned int clk_khz,
 	return 0;
 }
 
-static void designware_wdt_enable(void __iomem *base)
+static void designware_wdt_enable(void __iomem *base, unsigned int rpl)
 {
-	writel(BIT(DW_WDT_CR_EN_OFFSET), base + DW_WDT_CR);
+	writel(BIT(DW_WDT_CR_EN_OFFSET) | rpl << DW_WDT_CR_RPL_OFFSET,
+	       base + DW_WDT_CR);
 }
 
 static unsigned int designware_wdt_is_enabled(void __iomem *base)
@@ -81,7 +84,12 @@ static int designware_wdt_stop(struct udevice *dev)
 	__maybe_unused int ret;
 
 	designware_wdt_reset(dev);
-	writel(0, priv->base + DW_WDT_CR);
+	/*
+	 * Software cannot clear WDT_EN, a running watchdog keeps counting:
+	 * keep its reset pulse length. An OS that sets WDT_EN later with a
+	 * read-modify-write of CR inherits it too.
+	 */
+	writel(priv->rpl << DW_WDT_CR_RPL_OFFSET, priv->base + DW_WDT_CR);
 
 	if (CONFIG_IS_ENABLED(DM_RESET) &&
 	    ofnode_read_prop(dev_ofnode(dev), "resets", &ret)) {
@@ -106,7 +114,7 @@ static int designware_wdt_start(struct udevice *dev, u64 timeout, ulong flags)
 	/* set timer in miliseconds */
 	designware_wdt_settimeout(priv->base, priv->clk_khz, timeout);
 
-	designware_wdt_enable(priv->base);
+	designware_wdt_enable(priv->base, priv->rpl);
 
 	/* reset the watchdog */
 	return designware_wdt_reset(dev);
@@ -120,6 +128,8 @@ static int designware_wdt_probe(struct udevice *dev)
 	priv->base = dev_remap_addr(dev);
 	if (!priv->base)
 		return -EINVAL;
+
+	priv->rpl = dev_get_driver_data(dev);
 
 #if CONFIG_IS_ENABLED(CLK)
 	struct clk clk;
@@ -160,7 +170,13 @@ static const struct wdt_ops designware_wdt_ops = {
 	.stop = designware_wdt_stop,
 };
 
+/*
+ * .data is the reset pulse length (CR.RPL, 2^(RPL + 1) pclk cycles). The
+ * RK3026's reset logic misses the default 2-cycle pulse now and then, so the
+ * watchdog resets one or more periods late; Rockchip's own driver uses 32.
+ */
 static const struct udevice_id designware_wdt_ids[] = {
+	{ .compatible = "rockchip,rk3026-wdt", .data = 4 },
 	{ .compatible = "snps,dw-wdt"},
 	{}
 };
