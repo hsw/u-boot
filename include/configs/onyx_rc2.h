@@ -81,7 +81,7 @@
 	"rc2_ums_acmwait=60\0" \
 	"rc2_ums_noacm=boot\0" \
 	"rc2_args=console=ttyGS0,115200 loglevel=8 ignore_loglevel " \
-		"clk_ignore_unused softlockup_panic=1 hung_task_panic=1 " \
+		"softlockup_panic=1 hung_task_panic=1 " \
 		"rc2ml.savelog=1\0" \
 	"rc2_find=setenv rc2_part; for p in 2 1; do " \
 		"if test -z \"${rc2_part}\" && " \
