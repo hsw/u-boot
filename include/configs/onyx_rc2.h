@@ -12,8 +12,10 @@
  * "else true": the old hush gives an "if" without a taken branch the
  * condition's status, which would fail "run rc2_load" / "run rc2_prep".
  * "run rc2_wdt_state" sets rc2_wdt_on to WDT_CR bit 0 (WDT_EN) of the
- * dw-wdt at 0x2004c000 ("wdt dev" first: its probe turns pclk_wdt on and
- * cannot clear WDT_EN); read only.
+ * dw-wdt at 0x2004c000 and leaves the watchdog as it found it: the register
+ * is read before the "wdt dev", whose probe turns pclk_wdt on and ends in
+ * designware_wdt_stop() (writes 0 to WDT_CR), and a watchdog armed before
+ * that is re-armed after it.
  *
  * "run rc2_ums" exports the card over USB mass storage until the host
  * ejects it, then brings the CDC ACM console back:
@@ -109,8 +111,11 @@
 		"if test \"${rc2_wdt_on}\" = 1; then echo \"rc2: watchdog already " \
 		"running (rc2_ums_wdt), rc2_wdt 0 has no effect until a reset\"; " \
 		"fi; true; fi\0" \
-	"rc2_wdt_state=setenv rc2_wdt_on 0; if wdt dev watchdog@2004c000; then " \
-		"setexpr.l rc2_wdt_on *0x2004c000 % 2; else true; fi\0" \
+	"rc2_wdt_state=setenv rc2_wdt_on 0; " \
+		"setexpr.l rc2_wdt_on *0x2004c000 % 2; " \
+		"if wdt dev watchdog@2004c000; then " \
+		"if test \"${rc2_wdt_on}\" = 1; then wdt start ${rc2_wdt_ms}; " \
+		"else true; fi; else true; fi\0" \
 	"rc2_boot=echo rc2: slot ${rc2_slot}; run rc2_load && run rc2_prep && " \
 		"bootz ${kernel_addr_r} ${rc2_rd} ${fdt_addr_r}\0" \
 	"rc2_bootcmd=setenv rc2_slot b; run rc2_boot; " \
