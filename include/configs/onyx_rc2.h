@@ -102,7 +102,8 @@
 		"setenv bootargs \"${rc2_args} rc2.loader=uboot rc2.slot=${rc2_slot} " \
 		"rc2.part=${rc2_part} rc2.bootcount=${bootcount}\"; " \
 		"if test \"${rc2_wdt}\" = 1; then " \
-		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; " \
+		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms} || " \
+		"echo rc2: no watchdog; " \
 		"else run rc2_wdt_state; " \
 		"if test \"${rc2_wdt_on}\" = 1; then echo \"rc2: watchdog already " \
 		"running (rc2_ums_wdt), rc2_wdt 0 has no effect until a reset\"; " \
