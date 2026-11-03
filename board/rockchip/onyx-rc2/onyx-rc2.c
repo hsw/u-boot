@@ -69,8 +69,13 @@ DECLARE_GLOBAL_DATA_PTR;
 #define GPIO2_BASE		0x20084000
 #define GPIO_SWPORTA_DR		0x00
 #define GPIO_SWPORTA_DDR	0x04
+#define GPIO_EXT_PORTA		0x50
 #define POWER_HOLD_BIT		BIT(2)		/* GPIO1_A2 */
 #define LED_BIT			BIT(15)		/* GPIO2_B7, blue, active high */
+#define RECOVER_KEY_BIT		BIT(13)		/* GPIO2_B5, the Page-Up pad, active low */
+
+#define GRF_GPIO2B_IOMUX	(GRF_BASE + 0xcc)
+#define GRF_GPIO2B_PULL		(GRF_BASE + 0x128)
 
 #define IMEM_BASE		0x10080000
 #define CORE_RESET_IMEM		(IMEM_BASE + 0x1000)	/* 8 KiB IMEM; stock soft_reset is at +0xf10 */
@@ -99,6 +104,61 @@ static void rc2_led(bool on)
 		setbits_le32((void __iomem *)(GPIO2_BASE + GPIO_SWPORTA_DR), LED_BIT);
 	else
 		clrbits_le32((void __iomem *)(GPIO2_BASE + GPIO_SWPORTA_DR), LED_BIT);
+}
+
+/* ---- the download (recover) key: the front Page-Up pad on GPIO2_B5 ----
+ *
+ * The board's loader key is the capacitive Page-Up pad next to the screen,
+ * its output on GPIO2_B5, active low (the stock parameter's
+ * "RECOVER_KEY:0,2,b,5,0" and the stock kernel's KEY_PAGEUP on the same pin).
+ * It is the pad the *stock loader* samples to enter Rockusb -- and with the
+ * microSD card in, the card's SPL and U-Boot run instead and the stock loader
+ * never executes. This override is what makes the pad work under U-Boot.
+ *
+ * Strong override of the weak ADC version in arch/arm/mach-rockchip/boot_mode.c
+ * (the pad is not an ADC key and CONFIG_ADC is off here). It is called by
+ * rockchip_dnl_mode_check() <- setup_boot_mode() <- board_late_init(): when it
+ * returns true, the generic code writes BOOT_BROM_DOWNLOAD to GRF_OS_REG5 and
+ * resets, and on the next boot the SPL -- the only stage that links
+ * bootrom.c -- sends the BootROM back to its USB download mode.
+ *
+ * Timing is not what one expects: the pad chip (TTP233D class) calibrates for
+ * about half a second after power-on, so a finger already on the pad when the
+ * book is switched on is part of its baseline and reads as NOT pressed. Power
+ * on first, then touch the pad (the left page key) and hold it; this runs
+ * seconds later, so a touch from about +0.3 s to +5 s is what the read sees.
+ *
+ * The pin needs three things to be a meaningful input, and nothing in the
+ * chain sets any of them: the mux, the pad's built-in pull and the direction.
+ * Mux: GRF_GPIO2B_IOMUX bits [11:10], reset value 0 = GPIO (stage2 writes the
+ * GPIO2_B7 field of the same register, the pinctrl driver only the SD pins).
+ * Pull: off -- bank 2 B/C pulls down when enabled, which would read as
+ * pressed; the stock kernel leaves these key pins pull-less as well. Both GRF
+ * registers are masked writes, the field mask in bits [31:16].
+ */
+#define RECOVER_KEY_SAMPLES	3
+
+int rockchip_dnl_key_pressed(void)
+{
+	int low = 0, i;
+
+	writel(BIT(10 + 16) | BIT(11 + 16), (void __iomem *)GRF_GPIO2B_IOMUX);	/* func 0 = GPIO */
+	writel(BIT(13 + 16) | BIT(13), (void __iomem *)GRF_GPIO2B_PULL);	/* pull off */
+	clrbits_le32((void __iomem *)(GPIO2_BASE + GPIO_SWPORTA_DDR), RECOVER_KEY_BIT);
+	udelay(1000);
+
+	/* the stock loader samples ten times and wants eight: the pad drives the
+	 * line through a touch chip and one read could land on its edge */
+	for (i = 0; i < RECOVER_KEY_SAMPLES; i++) {
+		if (!(readl((void __iomem *)(GPIO2_BASE + GPIO_EXT_PORTA)) & RECOVER_KEY_BIT))
+			low++;
+		udelay(1000);
+	}
+
+	printf("rc2: recover key %s (GPIO2_B5, %d/%d low)\n",
+	       low > RECOVER_KEY_SAMPLES / 2 ? "pressed" : "released", low, RECOVER_KEY_SAMPLES);
+
+	return low > RECOVER_KEY_SAMPLES / 2;
 }
 
 /*
