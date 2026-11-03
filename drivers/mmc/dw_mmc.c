@@ -623,10 +623,19 @@ static int dwmci_set_ios(struct mmc *mmc)
 #endif
 	struct dwmci_host *host = (struct dwmci_host *)mmc->priv;
 	u32 ctype, regs;
+	int ret;
 
 	debug("Bus width = %d, clock: %d\n", mmc->bus_width, mmc->clock);
 
-	dwmci_setup_bus(host, mmc->clock);
+	/*
+	 * dwmci_update_div() is the only writer of DWMCI_CLKENA, so a
+	 * dropped error here leaves the card clock off: dwmci_init() zeroes
+	 * CLKENA at its end and this call is what turns it back on.
+	 */
+	ret = dwmci_setup_bus(host, mmc->clock);
+	if (ret)
+		return ret;
+
 	switch (mmc->bus_width) {
 	case 8:
 		ctype = DWMCI_CTYPE_8BIT;
@@ -650,8 +659,6 @@ static int dwmci_set_ios(struct mmc *mmc)
 	dwmci_writel(host, DWMCI_UHS_REG, regs);
 
 	if (host->clksel) {
-		int ret;
-
 		ret = host->clksel(host);
 		if (ret)
 			return ret;
@@ -659,8 +666,6 @@ static int dwmci_set_ios(struct mmc *mmc)
 
 #if CONFIG_IS_ENABLED(DM_REGULATOR)
 	if (mmc->vqmmc_supply) {
-		int ret;
-
 		if (mmc->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
 			ret = regulator_set_value(mmc->vqmmc_supply, 1800000);
 		else
@@ -718,6 +723,7 @@ static void dwmci_init_dma(struct dwmci_host *host)
 static int dwmci_init(struct mmc *mmc)
 {
 	struct dwmci_host *host = mmc->priv;
+	int ret;
 
 	if (host->board_init)
 		host->board_init(host);
@@ -730,7 +736,9 @@ static int dwmci_init(struct mmc *mmc)
 	}
 
 	/* Enumerate at 400KHz */
-	dwmci_setup_bus(host, mmc->cfg->f_min);
+	ret = dwmci_setup_bus(host, mmc->cfg->f_min);
+	if (ret)
+		return ret;
 
 	dwmci_writel(host, DWMCI_RINTSTS, 0xffffffff);
 	dwmci_writel(host, DWMCI_INTMASK, 0);
