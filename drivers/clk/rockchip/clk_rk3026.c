@@ -675,13 +675,17 @@ static int rk3026_clk_bind(struct udevice *dev)
 	struct sysreset_reg *priv;
 
 	/*
-	 * ONYX RC2: the board's own sysreset (onyx-rc2.c) picks the reset
-	 * method (fst / snd / core) from Kconfig or the environment.
+	 * A board whose power hold is a PMIC PWRHLD on a GPIO brings its own
+	 * sysreset (onyx-rc2.c, rk3026-restart.c): it picks the reset method
+	 * (fst / snd / core) from Kconfig or the environment. Ask the board's
+	 * DT for it instead of a target symbol, so the same SoC on another
+	 * board is not compiled out of the GRF reset below.
 	 */
-	if (IS_ENABLED(CONFIG_TARGET_ONYX_RC2)) {
+	if (of_machine_is_compatible("onyx,rc2")) {
 		ret = device_bind_driver(dev, "rc2_sysreset", "sysreset", NULL);
 		if (ret)
-			debug("Warning: No rc2 sysreset driver: ret=%d\n", ret);
+			printf("%s: no rc2 sysreset driver: %d\n",
+			       __func__, ret);
 		goto reset_bind;
 	}
 
@@ -689,7 +693,7 @@ static int rk3026_clk_bind(struct udevice *dev)
 	ret = device_bind_driver(dev, "rockchip_sysreset", "sysreset",
 				 &sys_child);
 	if (ret) {
-		debug("Warning: No sysreset driver: ret=%d\n", ret);
+		printf("%s: no sysreset driver: %d\n", __func__, ret);
 	} else {
 		priv = malloc(sizeof(struct sysreset_reg));
 		priv->glb_srst_fst_value = offsetof(struct rk3026_cru,
