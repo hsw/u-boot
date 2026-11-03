@@ -55,6 +55,29 @@ static inline int64_t rockchip_timer_get_curr_value(struct rk_timer *timer)
 }
 
 #if CONFIG_IS_ENABLED(BOOTSTAGE)
+/*
+ * The tick timer a board picks in /chosen need not be one of the rk timers this
+ * driver binds: the ONYX boards point it at the A9 global timer, a different
+ * device. Its ctl/stat registers sit where struct rk_timer keeps its counter, so
+ * a blind cast reads ctl | stat << 32 -- constant, and every bootstage delta 0.
+ * The A9 timer also counts UP, unlike the rk timers, and needs the
+ * high/low/high retry arm_global_timer.c uses.
+ */
+static u64 a9_global_timer_get_count(void __iomem *base)
+{
+	u32 low, high, old = readl(base + 4);
+
+	while (1) {
+		low = readl(base);
+		high = readl(base + 4);
+		if (old == high)
+			break;
+		old = high;
+	}
+
+	return ((u64)high << 32) | low;
+}
+
 ulong timer_get_boot_us(void)
 {
 	uint64_t  ticks = 0;
@@ -71,7 +94,7 @@ ulong timer_get_boot_us(void)
 	} else if (CONFIG_IS_ENABLED(OF_REAL) && ret == -EAGAIN) {
 		/* We have been called so early that the DM is not ready,... */
 		ofnode node = offset_to_ofnode(-1);
-		struct rk_timer *timer = NULL;
+		void __iomem *base;
 
 		/*
 		 * ... so we try to access the raw timer, if it is specified
@@ -83,10 +106,16 @@ ulong timer_get_boot_us(void)
 			return 0;
 		}
 
-		timer = (struct rk_timer *)ofnode_get_addr(node);
+		base = (void __iomem *)ofnode_get_addr(node);
 
-		/* This timer is down-counting */
-		ticks = ~0uLL - rockchip_timer_get_curr_value(timer);
+		if (ofnode_device_is_compatible(node, "arm,cortex-a9-global-timer")) {
+			ticks = a9_global_timer_get_count(base);
+		} else {
+			/* This timer is down-counting */
+			ticks = ~0uLL -
+				rockchip_timer_get_curr_value((struct rk_timer *)base);
+		}
+
 		if (ofnode_read_u32(node, "clock-frequency", &rate)) {
 			debug("%s: could not read clock-frequency\n", __func__);
 			return 0;

@@ -131,4 +131,13 @@
 	 * U-Boot hanging with no console, not as an error.
 	 */
 	status = "okay";
+
+	/*
+	 * Only rockchip_timer.c's pre-DM path reads this: the DM
+	 * arm_global_timer takes the rate from clocks = <&cru CORE_PERI>
+	 * instead, but the first BOOTSTAGE marks are recorded in
+	 * initf_bootstage(), before initf_dm(), and that path has no clock
+	 * driver to ask. CORE_PERI is APLL/6.
+	 */
+	clock-frequency = <100000000>;
 };
