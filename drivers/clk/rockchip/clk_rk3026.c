@@ -408,9 +408,16 @@ static ulong rk3026_clk_get_rate(struct clk *clk)
 	ulong gclk_rate;
 
 	switch (clk->id) {
-	/* PLL DT ids: PLL_APLL(0) PLL_DPLL(1) PLL_CPLL(2) PLL_GPLL(3) */
+	/*
+	 * PLL DT ids: PLL_APLL(0) PLL_DPLL(1) PLL_CPLL(2) PLL_GPLL(3).
+	 * rkclk_pll_get_rate() takes the CLK_* enum instead, whose PLLs are
+	 * CLK_ARM..CLK_GENERAL -- the same four, one higher. Handed over as
+	 * they are, they were read one slot early: clk_shift[0] is 0xff, so
+	 * every PLL came back as OSC_HZ, and rk_pll_id() walked pll[-1..2] and
+	 * never read pll[3], the GPLL.
+	 */
 	case PLL_APLL ... PLL_GPLL:
-		return rkclk_pll_get_rate(priv->cru, clk->id);
+		return rkclk_pll_get_rate(priv->cru, clk->id + CLK_ARM);
 	case HCLK_EMMC:
 	case SCLK_EMMC:
 	case HCLK_SDMMC:
@@ -428,11 +435,12 @@ static ulong rk3026_clk_get_rate(struct clk *clk)
 	 * hardware 2026-07-30 -- `i2c probe` returned an empty list on both
 	 * buses while the GRF select and the pad mux were both verified correct.
 	 *
-	 * NOT LISTED, DELIBERATELY: PCLK_TIMER0. timer_pre_probe() takes clk
+	 * PCLK_TIMER0/1 are not listed and now come through the default below,
+	 * so a probed rk_timer gets the APB rate. timer_pre_probe() takes clk
 	 * index 0 as the timer's COUNTING rate and returns before reading the
-	 * DT's clock-frequency, so teaching this switch about PCLK_TIMER0 would
-	 * silently run the timebase at the APB rate instead of xin24m's 24 MHz.
-	 * See docs/PORT-FIXES.md §3b.
+	 * DT's clock-frequency, so a timebase off those nodes would run at the
+	 * APB rate instead of xin24m's 24 MHz; neither is /chosen/tick-timer
+	 * (the A9 global timer is, off CORE_PERI). See docs/PORT-FIXES.md §3b.
 	 */
 	/*
 	 * CORE_ACLK / CORE_PERI divide core_pre, which is the selected core PLL
@@ -473,7 +481,20 @@ static ulong rk3026_clk_get_rate(struct clk *clk)
 							       CLK_CODEC),
 					    clk->id);
 	default:
-		return -ENOENT;
+		/*
+		 * A rate, not -ENOENT. This op returns ulong and its callers
+		 * use the result as one: rk_i2c.c:77 does not test
+		 * IS_ERR_VALUE() and designware_wdt.c:135 divides it, so an
+		 * errno here became a 4294967 kHz clock and a ~2683 divider.
+		 * An id this driver does not model is a peripheral-bus leaf,
+		 * so report the APB rate its siblings above report.
+		 */
+		return rk3026_peri_get_rate(priv->cru,
+					    rkclk_pll_get_rate(priv->cru,
+							       CLK_GENERAL),
+					    rkclk_pll_get_rate(priv->cru,
+							       CLK_CODEC),
+					    clk->id);
 	}
 }
 

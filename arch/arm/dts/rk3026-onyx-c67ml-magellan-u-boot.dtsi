@@ -49,6 +49,11 @@
  * out (include/wait_bit.h:45), which hangs acm_stdio_start() -- the LED
  * rhythms still run (spin loops) but USB never enumerates.
  *
+ * Since 2026-11-03 an id the CRU driver does not model answers with the APB
+ * rate instead of -ENOENT, so a probe now finds ~66 MHz here rather than 0
+ * and the property is inert -- but still the fallback the moment that
+ * answer changes, and the APB rate is not the rate this block counts on.
+ *
  * PROVEN on hardware 2026-07-29 (card 78, 4:1 match).  Regressed 2026-07-29
  * by f513e0e, which copied the canonical dtsi over this tree's; kept here
  * rather than in dts/ because it is a U-Boot driver workaround and because
