@@ -98,7 +98,8 @@
 		"run rc2_load_rd\0" \
 	"rc2_prep=fdt addr ${fdt_addr_r} && fdt resize 0x1000 && " \
 		"if test \"${rc2_wdt_dt}\" = 1; then " \
-		"fdt set /watchdog@2004c000 status okay; fi; " \
+		"fdt set /watchdog@2004c000 status okay || " \
+		"echo rc2: no watchdog node; fi; " \
 		"setenv bootargs \"${rc2_args} rc2.loader=uboot rc2.slot=${rc2_slot} " \
 		"rc2.part=${rc2_part} rc2.bootcount=${bootcount}\"; " \
 		"if test \"${rc2_wdt}\" = 1; then " \
