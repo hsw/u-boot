@@ -35,6 +35,7 @@
 #include <time.h>
 #include <watchdog.h>
 #include <asm/global_data.h>
+#include <asm/arch-rockchip/boot_mode.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <linux/bitops.h>
@@ -119,8 +120,37 @@ static void rc2_led(bool on)
  * (the pad is not an ADC key and CONFIG_ADC is off here). It is called by
  * rockchip_dnl_mode_check() <- setup_boot_mode() <- board_late_init(): when it
  * returns true, the generic code writes BOOT_BROM_DOWNLOAD to GRF_OS_REG5 and
- * resets, and on the next boot the SPL -- the only stage that links
- * bootrom.c -- sends the BootROM back to its USB download mode.
+ * resets. This override also arms the vendor's own way out (below), so the
+ * whole chain hands the device over to the BootROM's USB download mode.
+ *
+ * Why one flag is not enough. GRF_OS_REG5 is read by the SPL, and the only
+ * stage that links bootrom.c -- but a non-zero return from the SPL does not
+ * jump to download mode: the ROM reads it as "this copy failed" and walks on
+ * to its next IDBlock copy, then to its next medium, which on this board is
+ * the eMMC and the stock loader in its boot area. So on the card chain the pad
+ * would end up booting the stock loader, and on the stage2 chain (no SPL at
+ * all, nothing reads OS_REG5) it would do nothing at all.
+ *
+ * The way out that covers every stage is the *vendor's* gate: the stock
+ * FlashData returns 1 without a DDR init -- i.e. "this copy failed" -- when
+ * its warm marker GRF_OS_REG3 = 0x13247865 is present and
+ * GRF_OS_REG4[15:0] = 0xa53c. Every FlashData copy in the boot order bails
+ * that way (the card's, then the eMMC's), so the ROM runs out of media and
+ * falls into USB download mode. It is the same two words the stock loader's
+ * Rockusb reset subcode 3 writes before jumping to the ROM, so this is the
+ * vendor's own "reset to MaskROM", not something invented here.
+ *
+ * The marker has to be written *by us*: FlashData sets it on its cold path,
+ * and on a book booting from a card no FlashData runs at all, so without it
+ * the eMMC's FlashData would take its cold path, clear OS_REG0..7 (taking
+ * OS_REG4 with it) and boot the stock loader as usual.
+ *
+ * The state survives until the GRF is cleared (a real power cycle): while it
+ * is set, every boot lands in download mode, which is what one wants during a
+ * recovery session. Caveat [VERIFY]: in that mode the host sends the stock
+ * loader's FlashData over USB, whose gate is still armed, so it may skip the
+ * DDR init and the usbplug that follows would run on untrained DDR
+ * (backlog flashdata-maskrom-gate-0xa53c.md).
  *
  * Timing is not what one expects: the pad chip (TTP233D class) calibrates for
  * about half a second after power-on, so a finger already on the pad when the
@@ -138,9 +168,23 @@ static void rc2_led(bool on)
  */
 #define RECOVER_KEY_SAMPLES	3
 
+#define GRF_OS_REG3		(GRF_BASE + 0x1d4)
+#define GRF_OS_REG4		(GRF_BASE + 0x1d8)
+#define FLASHDATA_WARM_MARKER	0x13247865	/* FlashData's own "a copy already ran" word */
+
+/* Arm the stock FlashData gate that makes every later stage hand over (see the
+ * block above). Called from the pressed path, before the generic code writes
+ * GRF_OS_REG5 and resets: both are plain GRF writes and the reset keeps the
+ * GRF, so the order between them does not matter. */
+static void rc2_arm_maskrom_gate(void)
+{
+	writel(FLASHDATA_WARM_MARKER, (void __iomem *)GRF_OS_REG3);
+	writel(BOOT_BROM_DOWNLOAD, (void __iomem *)GRF_OS_REG4);
+}
+
 int rockchip_dnl_key_pressed(void)
 {
-	int low = 0, i;
+	int low = 0, i, pressed;
 
 	writel(BIT(10 + 16) | BIT(11 + 16), (void __iomem *)GRF_GPIO2B_IOMUX);	/* func 0 = GPIO */
 	writel(BIT(13 + 16) | BIT(13), (void __iomem *)GRF_GPIO2B_PULL);	/* pull off */
@@ -155,10 +199,15 @@ int rockchip_dnl_key_pressed(void)
 		udelay(1000);
 	}
 
-	printf("rc2: recover key %s (GPIO2_B5, %d/%d low)\n",
-	       low > RECOVER_KEY_SAMPLES / 2 ? "pressed" : "released", low, RECOVER_KEY_SAMPLES);
+	pressed = low > RECOVER_KEY_SAMPLES / 2;
 
-	return low > RECOVER_KEY_SAMPLES / 2;
+	printf("rc2: recover key %s (GPIO2_B5, %d/%d low)\n",
+	       pressed ? "pressed" : "released", low, RECOVER_KEY_SAMPLES);
+
+	if (pressed)
+		rc2_arm_maskrom_gate();
+
+	return pressed;
 }
 
 /*
