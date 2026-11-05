@@ -9,6 +9,7 @@
 #include <blk.h>
 #include <command.h>
 #include <console.h>
+#include <dm/device.h>
 #include <errno.h>
 #include <g_dnl.h>
 #include <malloc.h>
@@ -45,6 +46,13 @@ static int ums_write_sector(struct ums *ums_dev,
 		return ret;
 
 	return blk_dwrite(block_dev, blkstart, blkcnt, buf);
+}
+
+static bool ums_can_write(struct blk_desc *block_dev)
+{
+	const struct blk_ops *ops = device_get_ops(block_dev->bdev);
+
+	return ops && ops->write;
 }
 
 static struct ums *ums;
@@ -112,7 +120,9 @@ static int ums_init(const char *devtype, const char *devnums_part_str)
 		}
 
 		ums[ums_count].read_sector = ums_read_sector;
-		ums[ums_count].write_sector = ums_write_sector;
+		/* no write op (e.g. MMC_WRITE off): export the device read-only */
+		ums[ums_count].write_sector = ums_can_write(block_dev) ?
+					      ums_write_sector : NULL;
 
 		name = malloc(UMS_NAME_LEN);
 		if (!name)
