@@ -2503,6 +2503,8 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 		rc = fsg_lun_open(&common->luns[i], ums[i].num_sectors, ums->block_dev.blksz, "");
 		if (rc)
 			goto error_luns;
+		/* a medium without a write path is reported write-protected */
+		common->luns[i].ro = !ums[i].write_sector;
 	}
 	common->lun = 0;
 
