@@ -18,6 +18,19 @@
 	};
 };
 
+&pinctrl {
+	emmc {
+		/* RST_n (GPIO1_C7) and PWREN (GPIO2_A5), as the kernel DT has them */
+		emmc_rstnout: emmc-rstnout {
+			rockchip,pins = <1 23 2 &pcfg_pull_default>;
+		};
+
+		emmc_pwren: emmc-pwren {
+			rockchip,pins = <2 5 2 &pcfg_pull_default>;
+		};
+	};
+};
+
 &{/} {
 	rc2_emmc: mmc@1021c000 {
 		compatible = "rockchip,rk3026-dw-mshc", "rockchip,rk3288-dw-mshc";
@@ -33,7 +46,7 @@
 		non-removable;
 		disable-wp;
 		pinctrl-names = "default";
-		pinctrl-0 = <&emmc_clk &emmc_cmd &emmc_bus8>;
+		pinctrl-0 = <&emmc_clk &emmc_cmd &emmc_rstnout &emmc_pwren &emmc_bus8>;
 		status = "okay";
 	};
 };
