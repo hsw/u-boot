@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * ONYX BOOX Robinson Crusoe 2, U-Boot started by the stock loader from the
+ * internal eMMC (onyx_rc2_emmc_defconfig): the microSD tree plus the eMMC.
+ *
+ * The eMMC is read here, never written: the defconfig turns MMC_WRITE off,
+ * and nothing in this build switches the hardware partitions or touches
+ * the boot bus or reset configuration. The NAND controller stays deleted:
+ * its SRAM at 0x10501000 holds the stock loader's hand-off block for the
+ * stock kernel, read (not written) by rc2android.
+ */
+
+#include "rk3026-onyx-rc2.dts"
+
+/ {
+	aliases {
+		mmc1 = &rc2_emmc;
+	};
+};
+
+&{/} {
+	rc2_emmc: mmc@1021c000 {
+		compatible = "rockchip,rk3026-dw-mshc", "rockchip,rk3288-dw-mshc";
+		reg = <0x1021c000 0x4000>;
+		interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru HCLK_EMMC>, <&cru SCLK_EMMC>;
+		clock-names = "biu", "ciu";
+		fifo-depth = <0x100>;
+		fifo-mode;
+		bus-width = <8>;
+		max-frequency = <25000000>;
+		cap-mmc-highspeed;
+		non-removable;
+		disable-wp;
+		pinctrl-names = "default";
+		pinctrl-0 = <&emmc_clk &emmc_cmd &emmc_bus8>;
+		status = "okay";
+	};
+};

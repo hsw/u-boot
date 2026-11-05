@@ -62,6 +62,34 @@
 #define CFG_SYS_TIMER_RATE	6000000
 #endif
 
+#ifdef CONFIG_RC2_EMMC_LOADER
+/*
+ * Started by the stock loader from the eMMC (onyx_rc2_emmc_defconfig):
+ * bootcmd = run rc2_emmc_bootcmd. The stock kernel (rc2android) is the
+ * default; the Page-Down pad held when the boot command runs (rc2key)
+ * selects the microSD slots, and when no slot boots the stock kernel
+ * follows. Android does not clear the bootcount, so altbootcmd keeps the
+ * same choice (the microSD then takes slot a only).
+ * rc2_ums_emmc exports the whole eMMC user area read-only.
+ */
+#define RC2_ALTBOOTCMD \
+	"altbootcmd=if rc2key; then echo rc2: Page-Down: microSD slot a; " \
+		"setenv rc2_slot a; run rc2_boot; fi; run rc2_android\0"
+#define RC2_EMMC_ENV \
+	"rc2_android=echo rc2: stock kernel from the eMMC; rc2android\0" \
+	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: microSD; " \
+		"run rc2_bootcmd; fi; run rc2_android\0" \
+	"rc2_ums_emmc=echo rc2: eMMC over USB mass storage, read only; " \
+		"setenv stdin serial; setenv stdout serial; setenv stderr serial; " \
+		"ums 0 mmc 1; setenv stdin serial,usbacm; " \
+		"setenv stdout serial,usbacm; setenv stderr serial,usbacm\0"
+#else
+#define RC2_ALTBOOTCMD \
+	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}, slot a; " \
+		"setenv rc2_slot a; run rc2_boot; echo rc2: slot a failed\0"
+#define RC2_EMMC_ENV
+#endif
+
 #undef CFG_EXTRA_ENV_SETTINGS
 #define CFG_EXTRA_ENV_SETTINGS \
 	"stdout=serial,usbacm\0" \
@@ -113,8 +141,7 @@
 		"bootz ${kernel_addr_r} ${rc2_rd} ${fdt_addr_r}\0" \
 	"rc2_bootcmd=setenv rc2_slot b; run rc2_boot; " \
 		"setenv rc2_slot a; run rc2_boot; echo rc2: no bootable slot\0" \
-	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}, slot a; " \
-		"setenv rc2_slot a; run rc2_boot; echo rc2: slot a failed\0" \
+	RC2_ALTBOOTCMD \
 	"rc2_ums=echo rc2: microSD over USB mass storage, eject on the host to end; " \
 		"setenv stdin serial; setenv stdout serial; setenv stderr serial; " \
 		"rc2_ustat start; " \
@@ -134,6 +161,7 @@
 		"itest.l *0x7fff6014 == 0xadcdaaac; then " \
 		"mw.l 0x7fff6010 0 2; dcache flush; " \
 		"setenv rc2_ums_wdt 0; setenv rc2_ums_acmwait 0; " \
-		"run rc2_ums; reset; fi\0"
+		"run rc2_ums; reset; fi\0" \
+	RC2_EMMC_ENV
 
 #endif
