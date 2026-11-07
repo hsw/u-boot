@@ -41,12 +41,14 @@
 #include <command.h>
 #include <cpu_func.h>
 #include <dm/device.h>
+#include <dm/uclass.h>
 #include <env.h>
 #include <hang.h>
 #include <malloc.h>
 #include <mmc.h>
 #include <stdio.h>
 #include <vsprintf.h>
+#include <wdt.h>
 #include <asm/global_data.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -625,10 +627,23 @@ static void rc2a_pads_restore(void)
 	}
 }
 
+/* reset through the running watchdog; a plain reset if that is not possible */
+static void __noreturn rc2a_wdt_fire(void)
+{
+	struct udevice *wdt;
+
+	if (!uclass_get_device_by_name(UCLASS_WDT, "watchdog@2004c000", &wdt))
+		wdt_expire_now(wdt, 0);		/* does not return on success */
+	do_reset(NULL, 0, 0, NULL);
+	hang();
+}
+
 static void __noreturn rc2a_jump(struct rc2a *a)
 {
 	void (*entry)(int, int, uint) = (void *)a->kernel_img;
 
+	if (readl(WDT_CR) & 1)		/* checked first in do_rc2android; never jump with it */
+		rc2a_wdt_fire();
 	bootm_final(0);
 	cleanup_before_linux();
 	rc2a_pads_restore();
@@ -666,6 +681,19 @@ static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const 
 	bool dry = argc > 1 && !strcmp(argv[1], "-n");
 	int ret = CMD_RET_FAILURE;
 
+	/*
+	 * The stock kernel has no watchdog driver and the dw-wdt cannot be
+	 * stopped once enabled: never start it with the watchdog running.
+	 * Fire the watchdog instead (a global reset, which also stops it); a
+	 * core reset would leave it counting into the next boot.
+	 */
+	if (readl(WDT_CR) & 1) {
+		printf("rc2android: the watchdog runs and the stock kernel does not feed it: %s\n",
+		       dry ? "refused" : "watchdog reset");
+		if (!dry)
+			rc2a_wdt_fire();
+		return CMD_RET_FAILURE;
+	}
 	if (rc2a_open(&a))
 		return CMD_RET_FAILURE;
 	if (rc2a_parameter(&a) || rc2a_num(&a, "MACHINE", &a.machine) ||
@@ -701,8 +729,6 @@ static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const 
 	       a.atag, rc2a_atags(&a), a.machine, a.kernel_img);
 	printf("rc2android: cmdline: %s\n", a.cmdline);
 	rc2a_pads_report();
-	if (readl(WDT_CR) & 1)
-		printf("rc2android: warning: the watchdog runs; the stock kernel may not feed it\n");
 	if (rc2a_sram_check())
 		goto out;
 	if (dry) {

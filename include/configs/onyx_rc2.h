@@ -50,6 +50,7 @@
 #define __CONFIG_H
 
 #include <configs/rk3026_common.h>
+#include <linux/stringify.h>
 
 #ifdef CONFIG_XPL_BUILD
 /*
@@ -71,10 +72,26 @@
  * rc2_blkdevparts; the slots, the bootcount and the watchdog then work as
  * on the microSD. The Page-Down pad held when the boot command runs
  * (rc2key) selects the stock kernel (rc2android), which also follows when
- * no slot boots: a slot is given up before the watchdog starts if its
- * zImage has no zImage magic, since the stock kernel may not feed it.
- * Android does not clear the bootcount, so a few warm resets from it end
- * in altbootcmd: slot a only, or the stock kernel with the pad held.
+ * no slot boots.
+ *
+ * The stock kernel has no watchdog driver, and the dw-wdt cannot be
+ * stopped once enabled (WDT_EN clears only on a reset; the kernel DT has
+ * no reset line for it): rc2android never starts it with the watchdog
+ * running. rc2_android checks WDT_CR.WDT_EN first and, when it is set,
+ * fires the watchdog at once ("wdt expire": a global reset, which also
+ * clears the watchdog) instead; rc2android itself refuses as well. So a
+ * slot that fails after rc2_prep started the watchdog (bootz refused it)
+ * ends in a reset, never in Android. A slot without zImage magic is
+ * given up before the watchdog starts.
+ *
+ * Bootcount ladder (the DDR word, kept across the core reset and, on the
+ * cable, a watchdog reset; FlashBoot does not touch it; lost at power
+ * off): up to bootlimit, bootcmd (slot b, slot a); bootlimit + 1
+ * (rc2_alt_slot_a), altbootcmd tries slot a once; above that, the stock
+ * kernel at once, the watchdog never started in that boot. The pad
+ * selects the stock kernel at any count. rc2_android clears the
+ * bootcount before rc2android (Android never clears it), so the next
+ * reset from Android starts the ladder again.
  * A slot may hold slot.env, "rc2_slot_args=WORDS" (one line, at most
  * 256 bytes read), appended to the kernel command line (e.g.
  * rc2.ramroot=1). The command line names the eMMC as rc2.part=emmc and
@@ -88,14 +105,23 @@
 #define RC2_LOAD_TAIL		" && run rc2_load_slot_env && run rc2_zimage_ok"
 #define RC2_ALTBOOTCMD \
 	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}; " \
-		"if rc2key; then echo rc2: Page-Down: stock kernel; run rc2_android; " \
-		"else run rc2_emmc_slot_a; run rc2_android; fi\0"
+		"if rc2key; then echo rc2: Page-Down: stock kernel; " \
+		"else run rc2_emmc_alt; fi; run rc2_android\0"
 #define RC2_EMMC_ENV \
-	"rc2_android=echo rc2: stock kernel from the eMMC; rc2android\0" \
+	"rc2_alt_slot_a=3\0" \
+	"rc2_android=run rc2_wdt_state; " \
+		"if test \"${rc2_wdt_on}\" = 1; then run rc2_wdt_fire; fi; " \
+		"echo rc2: stock kernel from the eMMC; " \
+		"mw.l " __stringify(CONFIG_SYS_BOOTCOUNT_ADDR) " 0; dcache flush; rc2android\0" \
+	"rc2_wdt_fire=echo rc2: watchdog running, the stock kernel would not feed it: " \
+		"watchdog reset; wdt dev watchdog@2004c000 && wdt expire; reset\0" \
 	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: stock kernel; " \
-		"run rc2_android; else run rc2_emmc_linux; run rc2_android; fi\0" \
+		"else run rc2_emmc_linux; fi; run rc2_android\0" \
 	"rc2_emmc_linux=if rc2cache; then run rc2_bootcmd; " \
 		"else echo rc2: no Linux slots on the eMMC; fi\0" \
+	"rc2_emmc_alt=if itest ${bootcount} -le ${rc2_alt_slot_a}; then " \
+		"run rc2_emmc_slot_a; else echo rc2: bootcount ${bootcount}: " \
+		"stock kernel, no watchdog; fi\0" \
 	"rc2_emmc_slot_a=if rc2cache; then setenv rc2_slot a; run rc2_boot; " \
 		"echo rc2: slot a failed; fi\0" \
 	"rc2_load_slot_env=setenv rc2_slot_args; " \
