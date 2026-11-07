@@ -493,6 +493,12 @@ static int rc2_sysreset_request(struct udevice *dev, enum sysreset_t type)
 		m = CONFIG_RC2_RESET_METHOD;
 
 	printf("rc2: reset (%s)\n", m);
+	/*
+	 * Without this the BootROM cannot boot from the eMMC after the reset
+	 * and falls to MaskROM mode when no card is in (android.c).
+	 */
+	if (IS_ENABLED(CONFIG_RC2_EMMC_LOADER))
+		rc2_emmc_preboot();
 	mdelay(20);
 	/*
 	 * Leave the bus before the reset (soft disconnect: D+ pull-up off) and

@@ -32,7 +32,9 @@
  * before it), the Image right after. CRCs are the Rockchip CRC32 (poly
  * 0x04c10db7, MSB first, initial value 0).
  *
- * The eMMC is only read (blk_dread on mmc 1, user area).
+ * The eMMC is only read (blk_dread on mmc 1, user area). Before a reset
+ * rc2_emmc_preboot() puts it back in its pre-boot state (RST_n, CMD0):
+ * no data is written.
  */
 
 #include <blk.h>
@@ -47,6 +49,7 @@
 #include <malloc.h>
 #include <mmc.h>
 #include <stdio.h>
+#include <time.h>
 #include <vsprintf.h>
 #include <wdt.h>
 #include <asm/global_data.h>
@@ -632,6 +635,7 @@ static void __noreturn rc2a_wdt_fire(void)
 {
 	struct udevice *wdt;
 
+	rc2_emmc_preboot();
 	if (!uclass_get_device_by_name(UCLASS_WDT, "watchdog@2004c000", &wdt))
 		wdt_expire_now(wdt, 0);		/* does not return on success */
 	do_reset(NULL, 0, 0, NULL);
@@ -898,3 +902,94 @@ static int do_rc2key(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv
 
 U_BOOT_CMD(rc2key, 1, 0, do_rc2key,
 	   "true while the Page-Down pad is touched", "");
+
+/*
+ * The eMMC back to its pre-boot state, run before every reset this U-Boot
+ * issues (rc2_sysreset_request, the watchdog fire, rc2_wdt_fire).
+ *
+ * After a warm reset the RK3026 BootROM reads the eMMC only with the boot
+ * operation: CMD held low, 1-bit, no boot ack. It resets just the
+ * controller's FIFO and DMA (CTRL = 3), not its bus width, clock divider
+ * or UHS setting, sends no CMD0 and does not pulse RST_n. A device that
+ * FlashBoot and this U-Boot left in Transfer state, 8-bit, behind a
+ * controller set up for that, never sends boot data, and the ROM ends in
+ * MaskROM mode: with no card in the slot, the book does not come back.
+ * The stock kernel sends CMD0 0xF0F0F0F0 in its flash driver's shutdown,
+ * FlashBoot does the same before its soft reset.
+ *
+ * Tried on the book: CMD0 0xF0F0F0F0 alone, an RST_n pulse alone, both
+ * together and the controller's CTYPE alone each still end in MaskROM;
+ * the whole sequence below reaches Android. It is not bisected, so it is
+ * kept whole and in the tested order: controller to 1-bit, clock divider
+ * 0 and UHS_REG 0; an RST_n pulse (RST_n_FUNCTION is enabled in the
+ * book's EXT_CSD; JEDEC asks for tRSTW >= 1 us, the test held it 1 s,
+ * this holds it 100 ms, then waits 1 ms for tRSCA >= 200 us); CMD0
+ * GO_PRE_IDLE. No data is written, no clock is gated or changed in the
+ * CRU, CLKENA stays as it is. The eMMC is unusable afterwards until it is
+ * initialised again: only a reset may follow.
+ *
+ * A watchdog reset of a hung system runs no code first, so it still leaves
+ * the eMMC as it was.
+ */
+#define EMMC_BASE		0x1021c000	/* dw_mmc of the eMMC */
+#define EMMC_CLKDIV		(EMMC_BASE + 0x08)
+#define EMMC_CTYPE		(EMMC_BASE + 0x18)
+#define EMMC_CMDARG		(EMMC_BASE + 0x28)
+#define EMMC_CMD		(EMMC_BASE + 0x2c)
+#define EMMC_RINTSTS		(EMMC_BASE + 0x44)
+#define EMMC_UHS_REG		(EMMC_BASE + 0x74)
+#define EMMC_RST_N		(EMMC_BASE + 0x78)
+#define EMMC_CMD_START		BIT(31)
+#define EMMC_CMD_HOLD		BIT(29)		/* use_hold_reg */
+#define EMMC_CMD_PRVDATA	BIT(13)		/* wait_prvdata_complete */
+#define EMMC_INT_CMD_DONE	BIT(2)
+#define EMMC_INT_HLE		BIT(12)
+#define EMMC_ARG_PRE_IDLE	0xf0f0f0f0
+#define EMMC_RST_LOW_MS		100
+#define EMMC_CMD_TIMEOUT_MS	100
+
+void rc2_emmc_preboot(void)
+{
+	u32 cmd, rint;
+	ulong start;
+
+	writel(0, (void __iomem *)EMMC_CTYPE);
+	writel(0, (void __iomem *)EMMC_CLKDIV);
+	writel(0, (void __iomem *)EMMC_UHS_REG);
+	writel(0, (void __iomem *)EMMC_RST_N);
+	mdelay(EMMC_RST_LOW_MS);
+	writel(1, (void __iomem *)EMMC_RST_N);
+	mdelay(1);
+	writel(0xffffffff, (void __iomem *)EMMC_RINTSTS);
+	writel(EMMC_ARG_PRE_IDLE, (void __iomem *)EMMC_CMDARG);
+	/* CMD0, no response */
+	writel(EMMC_CMD_START | EMMC_CMD_HOLD | EMMC_CMD_PRVDATA, (void __iomem *)EMMC_CMD);
+
+	start = get_timer(0);
+	do {
+		cmd = readl((void __iomem *)EMMC_CMD);
+		rint = readl((void __iomem *)EMMC_RINTSTS);
+		if (!(cmd & EMMC_CMD_START) && (rint & (EMMC_INT_CMD_DONE | EMMC_INT_HLE)))
+			break;
+	} while (get_timer(start) < EMMC_CMD_TIMEOUT_MS);
+
+	if (!(cmd & EMMC_CMD_START) && (rint & EMMC_INT_CMD_DONE) && !(rint & EMMC_INT_HLE))
+		printf("rc2: eMMC to pre-boot state: 1-bit, RST_n %d ms, GO_PRE_IDLE done\n",
+		       EMMC_RST_LOW_MS);
+	else
+		printf("rc2: eMMC to pre-boot state: 1-bit, RST_n %d ms, GO_PRE_IDLE not done (CMD %08x, RINTSTS %08x)\n",
+		       EMMC_RST_LOW_MS, cmd, rint);
+}
+
+static int do_rc2preboot(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	rc2_emmc_preboot();
+
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(rc2preboot, 1, 0, do_rc2preboot,
+	   "put the eMMC back in its pre-boot state, right before a reset",
+	   "\n"
+	   "    as every reset from this U-Boot does first; the eMMC is unusable\n"
+	   "    until it is initialised again");

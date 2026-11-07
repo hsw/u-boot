@@ -84,6 +84,12 @@
  * ends in a reset, never in Android. A slot without zImage magic is
  * given up before the watchdog starts.
  *
+ * Every reset this U-Boot issues ("reset", the sysreset paths, the
+ * watchdog fire) first puts the eMMC back in its pre-boot state
+ * (rc2preboot): without that the BootROM cannot boot from it after a warm
+ * reset and falls to MaskROM mode when no card is in. A watchdog reset of
+ * a hung system runs no code and still ends there.
+ *
  * Bootcount ladder (the DDR word, kept across the core reset and, on the
  * cable, a watchdog reset; FlashBoot does not touch it; lost at power
  * off): up to bootlimit, bootcmd (slot b, slot a); bootlimit + 1
@@ -114,7 +120,7 @@
 		"echo rc2: stock kernel from the eMMC; " \
 		"mw.l " __stringify(CONFIG_SYS_BOOTCOUNT_ADDR) " 0; dcache flush; rc2android\0" \
 	"rc2_wdt_fire=echo rc2: watchdog running, the stock kernel would not feed it: " \
-		"watchdog reset; wdt dev watchdog@2004c000 && wdt expire; reset\0" \
+		"watchdog reset; rc2preboot; wdt dev watchdog@2004c000 && wdt expire; reset\0" \
 	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: stock kernel; " \
 		"else run rc2_emmc_linux; fi; run rc2_android\0" \
 	"rc2_emmc_linux=if rc2cache; then run rc2_bootcmd; " \
