@@ -44,6 +44,7 @@
 #include <linux/usb/gadget.h>
 #include <usb/dwc2_udc.h>
 #include "act8931-restore.h"
+#include "android.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -151,6 +152,9 @@ static void rc2_act8931_report(void)
 
 int board_early_init_f(void)
 {
+	/* first: the stock loader's pads, before this function or a driver changes one */
+	if (IS_ENABLED(CONFIG_CMD_RC2ANDROID))
+		rc2a_pads_save();
 	rc2_remap_off();
 	/* pclk_gpio1, pclk_gpio2 on (CLKGATE_CON8 bits 10, 11; 0 = running) */
 	writel(BIT(10 + 16) | BIT(11 + 16), (void __iomem *)CRU_CLKGATE_CON8);

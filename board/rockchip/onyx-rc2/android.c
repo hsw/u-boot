@@ -54,6 +54,7 @@
 #include <linux/delay.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
+#include "android.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -82,6 +83,14 @@ DECLARE_GLOBAL_DATA_PTR;
 #define GRF_SOC_CON0		0x20008140
 #define CRU_SOFTRST_CON0	0x20000110
 #define WDT_CR			0x2004c000
+#define CRU_CLKGATE_CON8	0x200000f0	/* bits 9..12: pclk_gpio0..3, 1 = gated */
+#define GRF_IOMUX		0x200080a8	/* GPIO0A..GPIO3D, 2 bits a pad */
+#define GRF_PULL		0x20008118	/* 16 pads a register, 1 = pull off */
+#define GPIO0_BASE		0x2007c000
+#define GPIO1_BASE		0x20080000
+#define GPIO2_BASE		0x20084000
+#define GPIO3_BASE		0x20088000
+#define GPIO_INTEN		0x30
 
 static u32 rkcrc_table[256];
 
@@ -422,12 +431,168 @@ static int rc2a_sram_check(void)
 	return 0;
 }
 
+/*
+ * Pads as the loader left them. The stock kernel was only ever started by
+ * the loader, so its pad setup may rely on what the loader leaves: record
+ * the pad mux, pull and GPIO data/direction at U-Boot's entry, show in
+ * "rc2android -n" what U-Boot changed since, and put it all back right
+ * before the jump. GPIO interrupts are only shown: no GPIO driver is
+ * built and the board code never enables one.
+ *
+ * Kept:
+ *  - GPIO1_A2, the power hold. U-Boot drives it high as the loader does;
+ *    the loader picks that pin or GPIO1_A1 from board straps, and the
+ *    hold must not drop whichever it drove.
+ * Put back with the rest:
+ *  - the eMMC pads (GPIO1_C6/C7, GPIO1_D0..D7, GPIO2_A5, GPIO2_A7): the
+ *    loader read the eMMC through them as well, and the stock flash
+ *    driver has only ever started from the loader's setup.
+ *
+ * Taken first thing in board_early_init_f(), before any driver probes:
+ * pinctrl applies a device's "default" state when the device probes, and
+ * initf_dm() before it only binds (nothing in this build is probed after
+ * bind). The record is in .data: written before relocation, it moves
+ * with the image.
+ */
+enum { RC2A_SHOW, RC2A_PULL, RC2A_GPIO, RC2A_MUX };	/* restore order */
+
+static const struct rc2a_pad_grp {
+	u32 base;
+	u8 n;		/* registers, 4 bytes apart */
+	u8 kind;
+	s8 bank;	/* GPIO bank whose pclk the registers need, or -1 */
+	const char *name;
+} rc2a_pad_grps[] = {
+	{ CRU_CLKGATE_CON8,		1,	RC2A_SHOW,	-1, "cru gate8" },
+	{ GRF_PULL,			8,	RC2A_PULL,	-1, "grf pull" },
+	{ GPIO0_BASE,			2,	RC2A_GPIO,	0, "gpio0 dr/ddr" },
+	{ GPIO1_BASE,			2,	RC2A_GPIO,	1, "gpio1 dr/ddr" },
+	{ GPIO2_BASE,			2,	RC2A_GPIO,	2, "gpio2 dr/ddr" },
+	{ GPIO3_BASE,			2,	RC2A_GPIO,	3, "gpio3 dr/ddr" },
+	{ GPIO0_BASE + GPIO_INTEN,	1,	RC2A_SHOW,	0, "gpio0 inten" },
+	{ GPIO1_BASE + GPIO_INTEN,	1,	RC2A_SHOW,	1, "gpio1 inten" },
+	{ GPIO2_BASE + GPIO_INTEN,	1,	RC2A_SHOW,	2, "gpio2 inten" },
+	{ GPIO3_BASE + GPIO_INTEN,	1,	RC2A_SHOW,	3, "gpio3 inten" },
+	{ GRF_IOMUX,			16,	RC2A_MUX,	-1, "grf iomux" },
+};
+
+#define RC2A_PAD_REGS		(1 + 8 + 4 * 2 + 4 + 16)	/* the n above */
+#define RC2A_PADS_MAGIC		0x53444150	/* "PADS" */
+
+static struct {
+	u32 magic;
+	u32 unrecorded;		/* groups whose bank clock was gated at entry */
+	u32 val[RC2A_PAD_REGS];
+} rc2a_pads __section(".data");
+
+static u32 rc2a_rd(u32 addr)
+{
+	return readl((void __iomem *)(ulong)addr);
+}
+
+static bool rc2a_pad_readable(const struct rc2a_pad_grp *g, u32 gate8)
+{
+	return g->bank < 0 || !(gate8 & BIT(9 + g->bank));
+}
+
+/* bits of a register the restore leaves as they are now: the power hold */
+static u32 rc2a_pad_keep(u32 addr)
+{
+	if (addr == GRF_IOMUX + 4 * 4)				/* GPIO1A */
+		return GENMASK(5, 4);				/* A2 */
+	if (addr == GPIO1_BASE || addr == GPIO1_BASE + 4)	/* DR, DDR */
+		return BIT(2);
+	return 0;
+}
+
+void rc2a_pads_save(void)
+{
+	u32 gate8 = rc2a_rd(CRU_CLKGATE_CON8);
+	int g, i, k = 0;
+
+	for (g = 0; g < ARRAY_SIZE(rc2a_pad_grps); g++) {
+		const struct rc2a_pad_grp *grp = &rc2a_pad_grps[g];
+
+		for (i = 0; i < grp->n; i++, k++) {
+			if (rc2a_pad_readable(grp, gate8))
+				rc2a_pads.val[k] = rc2a_rd(grp->base + 4 * i);
+			else
+				rc2a_pads.unrecorded |= BIT(g);
+		}
+	}
+	rc2a_pads.magic = RC2A_PADS_MAGIC;
+}
+
+static void rc2a_pads_report(void)
+{
+	u32 gate8 = rc2a_rd(CRU_CLKGATE_CON8);
+	int g, i, k = 0, n = 0;
+
+	if (rc2a_pads.magic != RC2A_PADS_MAGIC) {
+		printf("rc2android: no pad record from U-Boot's entry\n");
+		return;
+	}
+	for (g = 0; g < ARRAY_SIZE(rc2a_pad_grps); g++) {
+		const struct rc2a_pad_grp *grp = &rc2a_pad_grps[g];
+
+		if (rc2a_pads.unrecorded & BIT(g) || !rc2a_pad_readable(grp, gate8)) {
+			printf("rc2android: %s: clock gated %s, not compared\n", grp->name,
+			       rc2a_pads.unrecorded & BIT(g) ? "at entry" : "now");
+			k += grp->n;
+			continue;
+		}
+		for (i = 0; i < grp->n; i++, k++) {
+			u32 addr = grp->base + 4 * i;
+			u32 now = rc2a_rd(addr);
+
+			if (now == rc2a_pads.val[k])
+				continue;
+			printf("rc2android: pad reg %08x %-12s entry %08x now %08x%s\n",
+			       addr, grp->name, rc2a_pads.val[k], now,
+			       grp->kind == RC2A_SHOW ? " (not restored)" : "");
+			n++;
+		}
+	}
+	printf("rc2android: %d pad register(s) changed since entry; mux, pull, GPIO\n"
+	       "            data and direction go back before the jump\n", n);
+}
+
+static void rc2a_pads_restore(void)
+{
+	u32 gate8 = rc2a_rd(CRU_CLKGATE_CON8);
+	int kind, g, i, k;
+
+	if (rc2a_pads.magic != RC2A_PADS_MAGIC)
+		return;
+	/* pulls, then GPIO data before direction, then the mux */
+	for (kind = RC2A_PULL; kind <= RC2A_MUX; kind++) {
+		for (g = 0, k = 0; g < ARRAY_SIZE(rc2a_pad_grps); k += rc2a_pad_grps[g++].n) {
+			const struct rc2a_pad_grp *grp = &rc2a_pad_grps[g];
+
+			if (grp->kind != kind || rc2a_pads.unrecorded & BIT(g) ||
+			    !rc2a_pad_readable(grp, gate8))
+				continue;
+			for (i = 0; i < grp->n; i++) {
+				u32 addr = grp->base + 4 * i;
+				u32 keep = rc2a_pad_keep(addr), val = rc2a_pads.val[k + i] & ~keep;
+
+				if (kind == RC2A_GPIO)		/* plain register */
+					val |= rc2a_rd(addr) & keep;
+				else				/* GRF: write mask in [31:16] */
+					val = (~keep & 0xffff) << 16 | (val & 0xffff);
+				writel(val, (void __iomem *)(ulong)addr);
+			}
+		}
+	}
+}
+
 static void __noreturn rc2a_jump(struct rc2a *a)
 {
 	void (*entry)(int, int, uint) = (void *)a->kernel_img;
 
 	bootm_final(0);
 	cleanup_before_linux();
+	rc2a_pads_restore();
 	/* as the stock loader leaves them: CPU1 in soft reset, IMEM at address 0 */
 	writel(0x00100010, (void __iomem *)CRU_SOFTRST_CON0);
 	writel(BIT(12 + 16) | BIT(12), (void __iomem *)GRF_SOC_CON0);
@@ -486,6 +651,7 @@ static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const 
 	printf("rc2android: ATAGs at %#lx (%lu bytes), machine %lu, entry %#lx\n",
 	       a.atag, rc2a_atags(&a), a.machine, a.kernel_img);
 	printf("rc2android: cmdline: %s\n", a.cmdline);
+	rc2a_pads_report();
 	if (readl(WDT_CR) & 1)
 		printf("rc2android: warning: the watchdog runs; the stock kernel may not feed it\n");
 	if (rc2a_sram_check())
@@ -516,7 +682,6 @@ U_BOOT_CMD(rc2android, 2, 0, do_rc2android,
  */
 #define GRF_GPIO2B_IOMUX	0x200080cc
 #define GRF_GPIO2B_PULL		0x20008128
-#define GPIO2_BASE		0x20084000
 #define PAGEDOWN_BIT		BIT(14)
 
 static int do_rc2key(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
