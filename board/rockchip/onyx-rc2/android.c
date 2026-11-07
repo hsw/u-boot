@@ -116,6 +116,7 @@ static u32 rkcrc(const void *data, ulong len)
 }
 
 struct rc2a {
+	int dev;			/* mmc device number of the eMMC */
 	struct blk_desc *desc;
 	char *parm;			/* parameter text, NUL terminated */
 	ulong machine, atag, kernel_img;
@@ -218,41 +219,77 @@ static int rc2a_num(struct rc2a *a, const char *key, ulong *val)
 	return 0;
 }
 
-/* offset and size (sectors, partition-relative) of a partition of mtdparts= */
-static int rc2a_part(struct rc2a *a, const char *name, lbaint_t *off, lbaint_t *size)
+/* one entry of the parameter's mtdparts= list */
+struct rc2a_mtdpart {
+	const char *name;		/* not NUL terminated */
+	int name_len;
+	lbaint_t off, size;		/* user-area sectors */
+	bool rest;			/* "-": up to the end of the device */
+};
+
+/* the first entry of mtdparts= in the command line, or NULL */
+static const char *rc2a_mtdparts(struct rc2a *a)
 {
 	const char *p = strstr(a->cmdline, "mtdparts=");
-	size_t nl = strlen(name);
 
 	if (p)
 		p = strchr(p, ':');
+	return p ? p + 1 : NULL;
+}
+
+/*
+ * Parse the entry at *@pp ("SIZE@OFFSET(NAME)" or "-@OFFSET(NAME)", sectors
+ * relative to RC2A_PART_BASE) and step past it: 0, -ENOENT at the end of
+ * the list, -EINVAL on a malformed entry.
+ */
+static int rc2a_mtdpart_next(struct rc2a *a, const char **pp, struct rc2a_mtdpart *mp)
+{
+	const char *p = *pp;
+	char *e;
+	ulong sz = 0;
+
+	if (!p || !*p || *p == ' ')
+		return -ENOENT;
+	if (*p == '-')
+		e = (char *)p + 1;
+	else
+		sz = simple_strtoul(p, &e, 0);
+	if (*e != '@')
+		return -EINVAL;
+	mp->off = RC2A_PART_BASE + simple_strtoul(e + 1, &e, 0);
+	if (*e != '(')
+		return -EINVAL;
+	mp->name = e + 1;
+	e = strchr(mp->name, ')');
+	if (!e)
+		return -EINVAL;
+	mp->name_len = e - mp->name;
+	mp->rest = !sz;
+	mp->size = sz ? sz : a->desc->lba - mp->off;
+	if (*++e == ',')
+		e++;
+	*pp = e;
+	return 0;
+}
+
+/* offset and size (sectors, user area) of a partition of mtdparts= */
+static int rc2a_part(struct rc2a *a, const char *name, lbaint_t *off, lbaint_t *size)
+{
+	const char *p = rc2a_mtdparts(a);
+	struct rc2a_mtdpart mp;
+	int ret;
+
 	if (!p)
 		return -ENOENT;
-	for (p++; *p && *p != ' '; ) {
-		char *e;
-		ulong sz = 0, of;
-
-		if (*p == '-')
-			e = (char *)p + 1;
-		else
-			sz = simple_strtoul(p, &e, 0);
-		if (*e != '@')
-			return -EINVAL;
-		of = simple_strtoul(e + 1, &e, 0);
-		if (*e != '(')
-			return -EINVAL;
-		if (!strncmp(e + 1, name, nl) && e[1 + nl] == ')') {
-			*off = RC2A_PART_BASE + of;
-			*size = sz ? sz : a->desc->lba - *off;
+	while (!(ret = rc2a_mtdpart_next(a, &p, &mp))) {
+		if (mp.name_len == strlen(name) && !strncmp(mp.name, name, mp.name_len)) {
+			*off = mp.off;
+			*size = mp.size;
 			return 0;
 		}
-		p = strchr(e, ')');
-		if (!p)
-			return -EINVAL;
-		p++;
-		if (*p == ',')
-			p++;
 	}
+	if (ret != -ENOENT)
+		return ret;
 	printf("rc2android: no partition \"%s\" in mtdparts\n", name);
 	return -ENOENT;
 }
@@ -602,23 +639,33 @@ static void __noreturn rc2a_jump(struct rc2a *a)
 	hang();
 }
 
+/* the eMMC (env rc2a_mmc, default 1) on its user area */
+static int rc2a_open(struct rc2a *a)
+{
+	struct mmc *mmc;
+
+	a->dev = env_get_ulong("rc2a_mmc", 10, 1);
+	mmc = find_mmc_device(a->dev);
+	if (!mmc || mmc_init(mmc)) {
+		printf("rc2android: no eMMC at mmc %d\n", a->dev);
+		return -ENODEV;
+	}
+	a->desc = mmc_get_blk_desc(mmc);
+	if (!a->desc || a->desc->hwpart) {
+		printf("rc2android: mmc %d is not on its user area\n", a->dev);
+		return -ENODEV;
+	}
+	return 0;
+}
+
 static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 {
 	struct rc2a a = { };
 	bool dry = argc > 1 && !strcmp(argv[1], "-n");
-	int dev = env_get_ulong("rc2a_mmc", 10, 1);
-	struct mmc *mmc = find_mmc_device(dev);
 	int ret = CMD_RET_FAILURE;
 
-	if (!mmc || mmc_init(mmc)) {
-		printf("rc2android: no eMMC at mmc %d\n", dev);
+	if (rc2a_open(&a))
 		return CMD_RET_FAILURE;
-	}
-	a.desc = mmc_get_blk_desc(mmc);
-	if (!a.desc || a.desc->hwpart) {
-		printf("rc2android: mmc %d is not on its user area\n", dev);
-		return CMD_RET_FAILURE;
-	}
 	if (rc2a_parameter(&a) || rc2a_num(&a, "MACHINE", &a.machine) ||
 	    rc2a_num(&a, "ATAG", &a.atag) || rc2a_num(&a, "KERNEL_IMG", &a.kernel_img) ||
 	    rc2a_cmdline(&a) || rc2a_initrd(&a, false))
