@@ -90,6 +90,7 @@ DECLARE_GLOBAL_DATA_PTR;
 #define CRU_CLKGATE_CON8	0x200000f0	/* bits 9..12: pclk_gpio0..3, 1 = gated */
 #define GRF_IOMUX		0x200080a8	/* GPIO0A..GPIO3D, 2 bits a pad */
 #define GRF_PULL		0x20008118	/* 16 pads a register, 1 = pull off */
+#define GRF_OS_REG0		0x200081c8
 #define GPIO0_BASE		0x2007c000
 #define GPIO1_BASE		0x20080000
 #define GPIO2_BASE		0x20084000
@@ -627,6 +628,35 @@ static void rc2a_pads_restore(void)
 	}
 }
 
+/*
+ * GRF_OS_REG0..5: the stock DDR init's geometry (1) and warm marker (3),
+ * the loader's reboot flags (4), the kernel's boot mode (5). U-Boot clears
+ * the marker at entry (onyx-rc2.c); the stock kernel gets it back, so its
+ * reboot reaches the loader as it would after the loader's own boot, with
+ * the reboot flag ("adb reboot loader" / "recovery") intact: the DDR
+ * init's cold path would clear OS_REG4.
+ */
+static void rc2a_os_regs_report(void)
+{
+	int i;
+
+	printf("rc2android: GRF_OS_REG0..5 entry");
+	for (i = 0; i < RC2_OS_REGS; i++)
+		printf(" %08x", rc2_os_reg_entry[i]);
+	printf("\nrc2android: GRF_OS_REG0..5 now  ");
+	for (i = 0; i < RC2_OS_REGS; i++)
+		printf(" %08x", rc2a_rd(GRF_OS_REG0 + 4 * i));
+	printf("\n");
+	if (rc2_os_reg_entry[3] == RC2_FLASHDATA_WARM)
+		printf("rc2android: OS_REG3 warm marker goes back before the jump\n");
+}
+
+static void rc2a_os_regs_restore(void)
+{
+	if (rc2_os_reg_entry[3] == RC2_FLASHDATA_WARM)
+		writel(RC2_FLASHDATA_WARM, (void __iomem *)(GRF_OS_REG0 + 4 * 3));
+}
+
 /* reset through the running watchdog; a plain reset if that is not possible */
 static void __noreturn rc2a_wdt_fire(void)
 {
@@ -647,6 +677,7 @@ static void __noreturn rc2a_jump(struct rc2a *a)
 	bootm_final(0);
 	cleanup_before_linux();
 	rc2a_pads_restore();
+	rc2a_os_regs_restore();
 	/* as the stock loader leaves them: CPU1 in soft reset, IMEM at address 0 */
 	writel(0x00100010, (void __iomem *)CRU_SOFTRST_CON0);
 	writel(BIT(12 + 16) | BIT(12), (void __iomem *)GRF_SOC_CON0);
@@ -729,6 +760,7 @@ static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const 
 	       a.atag, rc2a_atags(&a), a.machine, a.kernel_img);
 	printf("rc2android: cmdline: %s\n", a.cmdline);
 	rc2a_pads_report();
+	rc2a_os_regs_report();
 	if (rc2a_sram_check())
 		goto out;
 	if (dry) {

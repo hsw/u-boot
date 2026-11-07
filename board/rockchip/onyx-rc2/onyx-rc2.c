@@ -18,6 +18,8 @@
  *    a reset restarts CPU0 in IMEM instead of the BootROM;
  *  - nothing above 0x7ff00000 is used by U-Boot (waveform window, ramoops,
  *    stage2 log and flag pages, bootcount).
+ *  - GRF_OS_REG3, the stock DDR init's warm marker, is cleared at entry
+ *    (rc2_flashdata_cold()), so a later warm reset gets its cold path.
  *
  * The OTG PHY bring-up and the gadget hand-off are Mario Rugiero's
  * (board/rockchip/boox-c67ml/boox-c67ml.c), same SoC.
@@ -62,6 +64,7 @@ DECLARE_GLOBAL_DATA_PTR;
 #define GRF_GPIO1A_IOMUX	(GRF_BASE + 0xb8)
 #define GRF_SOC_CON0		(GRF_BASE + 0x140)
 #define GRF_UOC1_CON4		(GRF_BASE + 0x190)
+#define GRF_OS_REG(n)		(GRF_BASE + 0x1c8 + 4 * (n))
 
 #define OTG_DCTL		(0x10180000 + 0x804)
 #define OTG_DCTL_SFTDISCON	BIT(1)
@@ -150,12 +153,49 @@ static void rc2_act8931_report(void)
 	writel(RC2_ACT_SEEN, &rec[0]);
 }
 
+/* GRF_OS_REG0..5 at U-Boot's entry; in .data: written before relocation, it moves with the image */
+u32 rc2_os_reg_entry[RC2_OS_REGS] __section(".data");
+
+/*
+ * The stock DDR init (FlashData, in the eMMC boot area and on stage2
+ * cards) takes its warm path when GRF_OS_REG3 holds its marker: no
+ * detection, no memory test, the geometry from OS_REG1. A warm reset
+ * (the core or a global soft reset, the watchdog) keeps the GRF, so
+ * after the first FlashData boot every such reset re-enters it warm.
+ * Without the marker it takes the cold path, as after a power-on: full
+ * init, and OS_REG0..7 cleared.
+ *
+ * FlashData has run by the time U-Boot starts and nothing after it reads
+ * the marker, so clear it: every later reset, from U-Boot, Linux or the
+ * watchdog, then gets FlashData's cold path. What that costs: the cold
+ * path also clears the stock loader's reboot flags in OS_REG4 (reboot
+ * loader / recovery) and the stock kernel's boot mode in OS_REG5. Neither
+ * U-Boot nor the mainline kernel sets them; for the stock kernel
+ * rc2android puts the marker back before the jump. OS_REG1, the DRAM
+ * geometry U-Boot and the kernels read, is left alone. DRAM keeps its
+ * content through the cold path as through a pinhole reset: the memory
+ * test writes only its probe words, none in the top MiB.
+ */
+static void rc2_flashdata_cold(void)
+{
+	int i;
+
+	for (i = 0; i < RC2_OS_REGS; i++)
+		rc2_os_reg_entry[i] = readl((void __iomem *)GRF_OS_REG(i));
+	if (rc2_os_reg_entry[3] != RC2_FLASHDATA_WARM)
+		return;
+	writel(0, (void __iomem *)GRF_OS_REG(3));
+	printf("rc2: GRF_OS_REG3 %08x (FlashData warm marker) cleared, OS_REG4 %08x\n",
+	       rc2_os_reg_entry[3], rc2_os_reg_entry[4]);
+}
+
 int board_early_init_f(void)
 {
 	/* first: the stock loader's pads, before this function or a driver changes one */
 	if (IS_ENABLED(CONFIG_CMD_RC2ANDROID))
 		rc2a_pads_save();
-	rc2_remap_off();
+	rc2_remap_off();		/* the first GRF write */
+	rc2_flashdata_cold();
 	/* pclk_gpio1, pclk_gpio2 on (CLKGATE_CON8 bits 10, 11; 0 = running) */
 	writel(BIT(10 + 16) | BIT(11 + 16), (void __iomem *)CRU_CLKGATE_CON8);
 	rc2_power_hold();
