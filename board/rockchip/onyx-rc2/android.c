@@ -125,6 +125,23 @@ static int rc2a_read(struct rc2a *a, lbaint_t lba, lbaint_t n, void *dst)
 	return 0;
 }
 
+/*
+ * The loader reads the parameter text line by line up to '\n' and drops
+ * every '\r' on the way, so a '\r' inside a line does not end it: the
+ * stock CMDLINE line is "...(user)\r pcb_ver=2 onyx_emmc=1\n", and the
+ * kernel gets " pcb_ver=2 onyx_emmc=1" as part of its command line. Copy
+ * the text the same way.
+ */
+static void rc2a_unix_lines(char *dst, const u8 *src, ulong len)
+{
+	while (len--) {
+		if (*src != '\r')
+			*dst++ = *src;
+		src++;
+	}
+	*dst = '\0';
+}
+
 static int rc2a_parameter(struct rc2a *a)
 {
 	ulong secs = DIV_ROUND_UP(8 + RC2A_PARM_MAX + 4, 512);
@@ -147,8 +164,7 @@ static int rc2a_parameter(struct rc2a *a)
 		a->parm = malloc(len + 1);
 		if (!a->parm)
 			break;
-		memcpy(a->parm, buf + 8, len);
-		a->parm[len] = '\0';
+		rc2a_unix_lines(a->parm, buf + 8, len);
 		free(buf);
 		return 0;
 	}
@@ -164,7 +180,7 @@ static const char *rc2a_key(struct rc2a *a, const char *key, int *len)
 	size_t kl = strlen(key);
 
 	while (p && *p) {
-		const char *eol = strpbrk(p, "\r\n");
+		const char *eol = strchr(p, '\n');
 		int n = eol ? eol - p : strlen(p);
 
 		if (n > kl && !strncmp(p, key, kl) && p[kl] == ':') {
