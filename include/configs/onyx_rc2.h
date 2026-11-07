@@ -65,25 +65,57 @@
 #ifdef CONFIG_RC2_EMMC_LOADER
 /*
  * Started by the stock loader from the eMMC (onyx_rc2_emmc_defconfig):
- * bootcmd = run rc2_emmc_bootcmd. The stock kernel (rc2android) is the
- * default; the Page-Down pad held when the boot command runs (rc2key)
- * selects the microSD slots, and when no slot boots the stock kernel
- * follows. Android does not clear the bootcount, so altbootcmd keeps the
- * same choice (the microSD then takes slot a only).
- * rc2_ums_emmc exports the whole eMMC user area read-only.
+ * bootcmd = run rc2_emmc_bootcmd. Linux boots from the slots in the eMMC
+ * "cache" partition: rc2cache maps it read-only as a blkmap (the
+ * filesystem is the whole device, "blkmap ${rc2_bm}:0") and sets
+ * rc2_blkdevparts; the slots, the bootcount and the watchdog then work as
+ * on the microSD. The Page-Down pad held when the boot command runs
+ * (rc2key) selects the stock kernel (rc2android), which also follows when
+ * no slot boots: a slot is given up before the watchdog starts if its
+ * zImage has no zImage magic, since the stock kernel may not feed it.
+ * Android does not clear the bootcount, so a few warm resets from it end
+ * in altbootcmd: slot a only, or the stock kernel with the pad held.
+ * A slot may hold slot.env, "rc2_slot_args=WORDS" (one line, at most
+ * 256 bytes read), appended to the kernel command line (e.g.
+ * rc2.ramroot=1). The command line names the eMMC as rc2.part=emmc and
+ * carries rc2_blkdevparts. rc2_ums_emmc exports the whole eMMC user area
+ * read-only.
  */
+#define RC2_FS			"blkmap ${rc2_bm}"
+#define RC2_FS_PARTS		"0"
+#define RC2_PART_ARG		"emmc"
+#define RC2_BOOTARGS_TAIL	" ${rc2_blkdevparts} ${rc2_slot_args}"
+#define RC2_LOAD_TAIL		" && run rc2_load_slot_env && run rc2_zimage_ok"
 #define RC2_ALTBOOTCMD \
-	"altbootcmd=if rc2key; then echo rc2: Page-Down: microSD slot a; " \
-		"setenv rc2_slot a; run rc2_boot; fi; run rc2_android\0"
+	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}; " \
+		"if rc2key; then echo rc2: Page-Down: stock kernel; run rc2_android; " \
+		"else run rc2_emmc_slot_a; run rc2_android; fi\0"
 #define RC2_EMMC_ENV \
 	"rc2_android=echo rc2: stock kernel from the eMMC; rc2android\0" \
-	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: microSD; " \
-		"run rc2_bootcmd; fi; run rc2_android\0" \
+	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: stock kernel; " \
+		"run rc2_android; else run rc2_emmc_linux; run rc2_android; fi\0" \
+	"rc2_emmc_linux=if rc2cache; then run rc2_bootcmd; " \
+		"else echo rc2: no Linux slots on the eMMC; fi\0" \
+	"rc2_emmc_slot_a=if rc2cache; then setenv rc2_slot a; run rc2_boot; " \
+		"echo rc2: slot a failed; fi\0" \
+	"rc2_load_slot_env=setenv rc2_slot_args; " \
+		"if test -e " RC2_FS ":${rc2_part} /rc2boot/${rc2_slot}/slot.env; then " \
+		"load " RC2_FS ":${rc2_part} ${scriptaddr} " \
+		"/rc2boot/${rc2_slot}/slot.env 0x100 && " \
+		"env import -t -r ${scriptaddr} ${filesize} rc2_slot_args; else true; fi\0" \
+	"rc2_zimage_ok=setexpr rc2_zm ${kernel_addr_r} + 0x24; " \
+		"if itest.l *${rc2_zm} == 0x016f2818; then true; else " \
+		"echo rc2: slot ${rc2_slot}: no zImage magic; false; fi\0" \
 	"rc2_ums_emmc=echo rc2: eMMC over USB mass storage, read only; " \
 		"setenv stdin serial; setenv stdout serial; setenv stderr serial; " \
 		"ums 0 mmc 1; setenv stdin serial,usbacm; " \
 		"setenv stdout serial,usbacm; setenv stderr serial,usbacm\0"
 #else
+#define RC2_FS			"mmc 0"
+#define RC2_FS_PARTS		"2 1"
+#define RC2_PART_ARG		"${rc2_part}"
+#define RC2_BOOTARGS_TAIL	""
+#define RC2_LOAD_TAIL		""
 #define RC2_ALTBOOTCMD \
 	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}, slot a; " \
 		"setenv rc2_slot a; run rc2_boot; echo rc2: slot a failed\0"
@@ -111,24 +143,24 @@
 	"rc2_args=console=ttyGS0,115200 loglevel=8 ignore_loglevel " \
 		"softlockup_panic=1 hung_task_panic=1 " \
 		"rc2ml.savelog=1\0" \
-	"rc2_find=setenv rc2_part; for p in 2 1; do " \
+	"rc2_find=setenv rc2_part; for p in " RC2_FS_PARTS "; do " \
 		"if test -z \"${rc2_part}\" && " \
-		"test -e mmc 0:${p} /rc2boot/${rc2_slot}/zImage; then " \
+		"test -e " RC2_FS ":${p} /rc2boot/${rc2_slot}/zImage; then " \
 		"setenv rc2_part ${p}; fi; done; test -n \"${rc2_part}\"\0" \
 	"rc2_load_rd=setenv rc2_rd -; " \
-		"if test -e mmc 0:${rc2_part} /rc2boot/${rc2_slot}/initrd.gz; then " \
-		"load mmc 0:${rc2_part} ${ramdisk_addr_r} " \
+		"if test -e " RC2_FS ":${rc2_part} /rc2boot/${rc2_slot}/initrd.gz; then " \
+		"load " RC2_FS ":${rc2_part} ${ramdisk_addr_r} " \
 		"/rc2boot/${rc2_slot}/initrd.gz && " \
 		"setenv rc2_rd ${ramdisk_addr_r}:${filesize}; else true; fi\0" \
 	"rc2_load=run rc2_find && " \
-		"load mmc 0:${rc2_part} ${kernel_addr_r} /rc2boot/${rc2_slot}/zImage && " \
-		"load mmc 0:${rc2_part} ${fdt_addr_r} /rc2boot/${rc2_slot}/rc2.dtb && " \
-		"run rc2_load_rd\0" \
+		"load " RC2_FS ":${rc2_part} ${kernel_addr_r} /rc2boot/${rc2_slot}/zImage && " \
+		"load " RC2_FS ":${rc2_part} ${fdt_addr_r} /rc2boot/${rc2_slot}/rc2.dtb && " \
+		"run rc2_load_rd" RC2_LOAD_TAIL "\0" \
 	"rc2_prep=fdt addr ${fdt_addr_r} && fdt resize 0x1000 && " \
 		"if test \"${rc2_wdt_dt}\" = 1; then " \
 		"fdt set /watchdog@2004c000 status okay; fi; " \
 		"setenv bootargs \"${rc2_args} rc2.loader=uboot rc2.slot=${rc2_slot} " \
-		"rc2.part=${rc2_part} rc2.bootcount=${bootcount}\"; " \
+		"rc2.part=" RC2_PART_ARG " rc2.bootcount=${bootcount}" RC2_BOOTARGS_TAIL "\"; " \
 		"if test \"${rc2_wdt}\" = 1; then " \
 		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; " \
 		"else run rc2_wdt_state; " \

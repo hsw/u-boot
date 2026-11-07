@@ -53,14 +53,16 @@ config RC2_EMMC_LOADER
 	  the ATAG list at 0x60000800, caches off, the IMEM remap set, CPU1
 	  in reset, and its eMMC hand-off block in the NAND controller SRAM.
 
-	  The default boot command boots the stock kernel the same way
-	  (rc2android); the Page-Down pad held at boot selects the microSD
-	  slots instead. The eMMC is read only: the defconfig turns
+	  The default boot command boots Linux from the slots in the eMMC
+	  "cache" partition (rc2cache), and the stock kernel the same way
+	  the loader would (rc2android) when the Page-Down pad is held at
+	  boot or no slot boots. The eMMC is read only: the defconfig turns
 	  MMC_WRITE off.
 
 config CMD_RC2ANDROID
 	bool "rc2android: boot the stock kernel from the eMMC as the stock loader does"
 	depends on MMC && BLK
+	select BLKMAP
 	help
 	  Reads the "parameter" block of an RC2-style eMMC, the kernel and
 	  the boot ramdisk (Rockchip KRNL images, CRC checked) from the
@@ -68,5 +70,9 @@ config CMD_RC2ANDROID
 	  CMDLINE) at the parameter's ATAG address and jumps to the kernel
 	  with the parameter's machine number. "rc2android -n" checks and
 	  reports without jumping.
+
+	  Also adds "rc2cache", which maps the "cache" partition the
+	  parameter names onto a blkmap device for the filesystem commands
+	  and sets the kernel's blkdevparts= for the eMMC.
 
 endif
