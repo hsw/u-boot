@@ -41,14 +41,12 @@
 #include <command.h>
 #include <cpu_func.h>
 #include <dm/device.h>
-#include <dm/uclass.h>
 #include <env.h>
 #include <hang.h>
 #include <malloc.h>
 #include <mmc.h>
 #include <stdio.h>
 #include <vsprintf.h>
-#include <wdt.h>
 #include <asm/global_data.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -495,13 +493,13 @@ static int rc2a_sram_check(void)
 	return 0;
 }
 
-/* reset through the running watchdog; a plain reset if that is not possible */
+/*
+ * Reset while the watchdog runs: rc2_sysreset_request() then puts the
+ * eMMC in its pre-boot state and fires the watchdog (a global reset,
+ * which also stops it), once, for every caller.
+ */
 static void __noreturn rc2a_wdt_fire(void)
 {
-	struct udevice *wdt;
-
-	if (!uclass_get_device_by_name(UCLASS_WDT, "watchdog@2004c000", &wdt))
-		wdt_expire_now(wdt, 0);		/* does not return on success */
 	do_reset(NULL, 0, 0, NULL);
 	hang();
 }

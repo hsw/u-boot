@@ -78,7 +78,7 @@
  * stopped once enabled (WDT_EN clears only on a reset; the kernel DT has
  * no reset line for it): rc2android never starts it with the watchdog
  * running. rc2_android checks WDT_CR.WDT_EN first and, when it is set,
- * fires the watchdog at once ("wdt expire": a global reset, which also
+ * fires the watchdog at once (rc2_wdt_fire: a global reset, which also
  * clears the watchdog) instead; rc2android itself refuses as well. So a
  * slot that fails after rc2_prep started the watchdog (bootz refused it)
  * ends in a reset, never in Android. A slot whose rc2.dtb fails "fdt
@@ -90,6 +90,16 @@
  * watchdog reset may drop the power hold, the book switches off, the
  * count is lost, and every power-on tries the same slot again; Page-Down
  * touched after power-on then selects the stock kernel.
+ *
+ * Every reset this U-Boot issues ("reset", panic, any sysreset) first
+ * puts the eMMC back in its pre-boot state (rc2preboot): without that the
+ * BootROM cannot boot from it after a warm reset and falls to MaskROM
+ * mode when no card is in. While the watchdog runs, that reset fires the
+ * watchdog instead of the rc2_reset method (a core reset would leave it
+ * counting), so rc2_wdt_fire is a plain "reset". Not covered: a watchdog
+ * reset of a hung system runs no code first, and "wdt expire" typed at
+ * the prompt goes to the watchdog driver directly; both still end in
+ * MaskROM with no card in. Use "reset".
  *
  * Bootcount ladder (the DDR word, kept across the core reset and, on the
  * cable, a watchdog reset; FlashBoot does not touch it; lost at power
@@ -121,7 +131,7 @@
 		"echo rc2: stock kernel from the eMMC; " \
 		"mw.l " __stringify(CONFIG_SYS_BOOTCOUNT_ADDR) " 0; dcache flush; rc2android\0" \
 	"rc2_wdt_fire=echo rc2: watchdog running, the stock kernel would not feed it: " \
-		"watchdog reset; wdt dev watchdog@2004c000 && wdt expire; reset\0" \
+		"watchdog reset; reset\0" \
 	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: stock kernel; " \
 		"else run rc2_emmc_linux; fi; run rc2_android\0" \
 	"rc2_emmc_linux=if rc2cache; then run rc2_bootcmd; " \

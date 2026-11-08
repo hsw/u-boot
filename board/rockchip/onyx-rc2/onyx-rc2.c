@@ -44,6 +44,7 @@
 #include <linux/usb/gadget.h>
 #include <usb/dwc2_udc.h>
 #include "act8931-restore.h"
+#include "emmc.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -64,6 +65,13 @@ DECLARE_GLOBAL_DATA_PTR;
 
 #define OTG_DCTL		(0x10180000 + 0x804)
 #define OTG_DCTL_SFTDISCON	BIT(1)
+
+#define WDT_BASE		0x2004c000	/* dw-wdt */
+#define WDT_CR			(WDT_BASE + 0x00)
+#define WDT_CR_EN		BIT(0)
+#define WDT_TORR		(WDT_BASE + 0x04)
+#define WDT_CRR			(WDT_BASE + 0x0c)
+#define WDT_CRR_RESTART		0x76
 
 #define GPIO1_BASE		0x20080000
 #define GPIO2_BASE		0x20084000
@@ -479,16 +487,40 @@ static void __noreturn rc2_core_reset(void)
 		;
 }
 
+/*
+ * eMMC build, a reset while the watchdog runs: the dw-wdt cannot be
+ * stopped once enabled, and a core reset leaves it counting into the next
+ * boot, which the stock loader and kernel never feed. Fire it instead: the
+ * shortest timeout (TOP 0, 2^16 pclk cycles, a few ms) loaded by a
+ * counter restart; its reset is a global one, which also clears it. Not
+ * through the driver's wdt_expire_now(): that prints to a console whose
+ * USB side is off the bus by then. Returns only if no reset came.
+ */
+static void rc2_wdt_fire(void)
+{
+	writel(0, (void __iomem *)WDT_TORR);
+	writel(WDT_CRR_RESTART, (void __iomem *)WDT_CRR);
+	mdelay(500);
+}
+
 static int rc2_sysreset_request(struct udevice *dev, enum sysreset_t type)
 {
 	const char *m = env_get("rc2_reset");
+	bool wdt = IS_ENABLED(CONFIG_RC2_EMMC_LOADER) &&
+		   readl((void __iomem *)WDT_CR) & WDT_CR_EN;
 
 	if (type == SYSRESET_POWER || type == SYSRESET_POWER_OFF)
 		return -EPROTONOSUPPORT;
 	if (!m || !*m)
 		m = CONFIG_RC2_RESET_METHOD;
 
-	printf("rc2: reset (%s)\n", m);
+	printf("rc2: reset (%s)\n", wdt ? "watchdog, it runs" : m);
+	/*
+	 * Without this the BootROM cannot boot from the eMMC after the reset
+	 * and falls to MaskROM mode when no card is in (emmc.c).
+	 */
+	if (IS_ENABLED(CONFIG_RC2_EMMC_LOADER))
+		rc2_emmc_preboot();
 	mdelay(20);
 	/*
 	 * Leave the bus before the reset (soft disconnect: D+ pull-up off) and
@@ -507,6 +539,8 @@ static int rc2_sysreset_request(struct udevice *dev, enum sysreset_t type)
 	 */
 	cleanup_before_linux();
 
+	if (wdt)
+		rc2_wdt_fire();
 	if (!strcmp(m, "fst"))
 		writel(0xfdb9, (void __iomem *)CRU_GLB_SRST_FST);
 	else if (!strcmp(m, "snd"))
