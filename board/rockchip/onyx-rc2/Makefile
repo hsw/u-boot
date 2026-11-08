@@ -5,4 +5,6 @@ obj-y += spl.o
 else
 obj-y += onyx-rc2.o
 obj-y += core-reset.o
+obj-$(CONFIG_RC2_EMMC_LOADER) += emmc.o
+obj-$(CONFIG_CMD_RC2ANDROID) += android.o
 endif
