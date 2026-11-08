@@ -36,15 +36,19 @@
  */
 
 #include <blk.h>
+#include <blkmap.h>
 #include <bootm.h>
 #include <command.h>
 #include <cpu_func.h>
+#include <dm/device.h>
+#include <dm/uclass.h>
 #include <env.h>
 #include <hang.h>
 #include <malloc.h>
 #include <mmc.h>
 #include <stdio.h>
 #include <vsprintf.h>
+#include <wdt.h>
 #include <asm/global_data.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -491,10 +495,23 @@ static int rc2a_sram_check(void)
 	return 0;
 }
 
+/* reset through the running watchdog; a plain reset if that is not possible */
+static void __noreturn rc2a_wdt_fire(void)
+{
+	struct udevice *wdt;
+
+	if (!uclass_get_device_by_name(UCLASS_WDT, "watchdog@2004c000", &wdt))
+		wdt_expire_now(wdt, 0);		/* does not return on success */
+	do_reset(NULL, 0, 0, NULL);
+	hang();
+}
+
 static void __noreturn rc2a_jump(struct rc2a *a)
 {
 	void (*entry)(int, int, uint) = (void *)a->kernel_img;
 
+	if (readl(WDT_CR) & 1)		/* checked first in do_rc2android; never jump with it */
+		rc2a_wdt_fire();
 	bootm_final(0);
 	cleanup_before_linux();
 	/* as the stock loader leaves them: CPU1 in soft reset, IMEM at address 0 */
@@ -547,6 +564,19 @@ static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const 
 	bool dry = argc > 1 && !strcmp(argv[1], "-n");
 	int ret = CMD_RET_FAILURE;
 
+	/*
+	 * The stock kernel has no watchdog driver and the dw-wdt cannot be
+	 * stopped once enabled: never start it with the watchdog running.
+	 * Fire the watchdog instead (a global reset, which also stops it); a
+	 * core reset would leave it counting into the next boot.
+	 */
+	if (readl(WDT_CR) & 1) {
+		printf("rc2android: the watchdog runs and the stock kernel does not feed it: %s\n",
+		       dry ? "refused" : "watchdog reset");
+		if (!dry)
+			rc2a_wdt_fire();
+		return CMD_RET_FAILURE;
+	}
 	if (rc2a_open(&a))
 		return CMD_RET_FAILURE;
 	if (rc2a_parameter(&a) || rc2a_num(&a, "MACHINE", &a.machine) ||
@@ -571,8 +601,6 @@ static int do_rc2android(struct cmd_tbl *cmdtp, int flag, int argc, char *const 
 	printf("rc2android: ATAGs at %#lx (%lu bytes), machine %lu, entry %#lx\n",
 	       a.atag, rc2a_atags(&a), a.machine, a.kernel_img);
 	printf("rc2android: cmdline: %s\n", a.cmdline);
-	if (readl(WDT_CR) & 1)
-		printf("rc2android: warning: the watchdog runs; the stock kernel may not feed it\n");
 	if (rc2a_sram_check())
 		goto out;
 	if (dry) {
@@ -591,6 +619,126 @@ U_BOOT_CMD(rc2android, 2, 0, do_rc2android,
 	   "[-n]\n"
 	   "    -n: load and check everything, report, do not start the kernel\n"
 	   "    env rc2a_mmc (default 1), rc2a_bootver, rc2a_args (appended)");
+
+/*
+ * rc2cache: the eMMC "cache" partition as a block device for the Linux
+ * slots, through a blkmap ("rc2cache") linearly mapped onto the eMMC user
+ * area. Where "cache" lies comes from the parameter's mtdparts=; the
+ * command refuses a parameter whose "cache" is not where this board puts
+ * it (RC2C_CACHE_LBA, RC2C_CACHE_SECTORS), so a different layout never
+ * gets a filesystem read from the wrong place. Nothing is written: with
+ * MMC_WRITE off the eMMC has no block write op, so a write through the
+ * map ends in blk_write() with -ENOSYS.
+ *
+ * Sets rc2_bm (the blkmap device number, for "blkmap ${rc2_bm}:0") and
+ * rc2_blkdevparts: "blkdevparts=mmcblkN:SIZE@OFFSET(NAME),..." with every
+ * entry of mtdparts= in bytes from the start of the user area, the kernel's
+ * cmdline partition syntax (N = the U-Boot mmc number; the kernel DT
+ * gives the eMMC the same mmc alias).
+ */
+#define RC2C_CACHE_LBA		(RC2A_PART_BASE + 0x120000)
+#define RC2C_CACHE_SECTORS	0x100000
+#define RC2C_BLKDEVPARTS_MAX	512
+
+static bool rc2c_name_ok(const struct rc2a_mtdpart *mp)
+{
+	int i;
+
+	for (i = 0; i < mp->name_len; i++)
+		if (!isalnum(mp->name[i]) && mp->name[i] != '_' && mp->name[i] != '-')
+			return false;
+	return mp->name_len > 0;
+}
+
+static int rc2c_blkdevparts(struct rc2a *a, char *buf, size_t len)
+{
+	const char *p = rc2a_mtdparts(a);
+	struct rc2a_mtdpart mp;
+	size_t n;
+	int ret = 0;
+
+	n = snprintf(buf, len, "blkdevparts=mmcblk%d:", a->dev);
+	while (n < len && !(ret = rc2a_mtdpart_next(a, &p, &mp))) {
+		/* rc2a_mtdpart_next() keeps the entry inside the user area */
+		if (!rc2c_name_ok(&mp)) {
+			printf("rc2cache: mtdparts entry \"%.*s\" not usable\n",
+			       mp.name_len, mp.name);
+			return -EINVAL;
+		}
+		if (buf[n - 1] != ':')
+			buf[n++] = ',';
+		if (mp.rest)
+			n += snprintf(buf + n, len - n, "-");
+		else
+			n += snprintf(buf + n, len - n, "%#llx", (u64)mp.size << 9);
+		if (n < len)
+			n += snprintf(buf + n, len - n, "@%#llx(%.*s)", (u64)mp.off << 9,
+				      mp.name_len, mp.name);
+	}
+	if (n >= len) {
+		printf("rc2cache: blkdevparts= longer than %zu bytes\n", len - 1);
+		return -E2BIG;
+	}
+	if (ret != -ENOENT || buf[n - 1] == ':') {
+		printf("rc2cache: malformed or empty mtdparts=\n");
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int do_rc2cache(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	char parts[RC2C_BLKDEVPARTS_MAX];
+	struct rc2a a = { };
+	struct udevice *bm_dev;
+	struct blk_desc *bd;
+	lbaint_t off, size;
+	int ret;
+
+	if (rc2a_open(&a))
+		return CMD_RET_FAILURE;
+	ret = rc2a_parameter(&a) || rc2a_cmdline(&a) || rc2a_part(&a, "cache", &off, &size) ||
+	      rc2c_blkdevparts(&a, parts, sizeof(parts));
+	if (ret)
+		goto out;
+	ret = -EINVAL;
+	if (off != RC2C_CACHE_LBA || size != RC2C_CACHE_SECTORS || off + size > a.desc->lba) {
+		printf("rc2cache: \"cache\" at sectors %#lx+%#lx, expected %#x+%#x: refused\n",
+		       (ulong)off, (ulong)size, RC2C_CACHE_LBA, RC2C_CACHE_SECTORS);
+		goto out;
+	}
+	bm_dev = blkmap_from_label("rc2cache");
+	if (bm_dev) {
+		ret = blkmap_destroy(bm_dev);
+		if (ret)
+			goto fail;
+	}
+	ret = blkmap_create("rc2cache", &bm_dev);
+	if (ret)
+		goto fail;
+	ret = blkmap_map_linear(bm_dev, 0, size, a.desc->bdev, off);
+	if (ret) {
+		blkmap_destroy(bm_dev);
+		goto fail;
+	}
+	bd = dev_get_uclass_plat(((struct blkmap *)dev_get_plat(bm_dev))->blk);
+	env_set_hex("rc2_bm", bd->devnum);
+	env_set("rc2_blkdevparts", parts);
+	printf("rc2cache: \"cache\" = mmc %d sectors %#lx+%#lx as blkmap %d, read only\n",
+	       a.dev, (ulong)off, (ulong)size, bd->devnum);
+	goto out;
+fail:
+	printf("rc2cache: blkmap failed (%d)\n", ret);
+out:
+	free(a.parm);
+	return ret ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(rc2cache, 1, 0, do_rc2cache,
+	   "map the eMMC \"cache\" partition read-only as blkmap \"rc2cache\"",
+	   "\n"
+	   "    sets rc2_bm (blkmap device number) and rc2_blkdevparts (kernel\n"
+	   "    blkdevparts= from the parameter's mtdparts=); env rc2a_mmc (default 1)");
 
 /*
  * rc2key: true while the Page-Down pad (GPIO2_B6, active low) is touched.

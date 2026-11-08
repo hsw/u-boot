@@ -50,6 +50,7 @@
 #define __CONFIG_H
 
 #include <configs/rk3026_common.h>
+#include <linux/stringify.h>
 
 #ifdef CONFIG_XPL_BUILD
 /*
@@ -65,25 +66,91 @@
 #ifdef CONFIG_RC2_EMMC_LOADER
 /*
  * Started by the stock loader from the eMMC (onyx_rc2_emmc_defconfig):
- * bootcmd = run rc2_emmc_bootcmd. The stock kernel (rc2android) is the
- * default; the Page-Down pad held when the boot command runs (rc2key)
- * selects the microSD slots, and when no slot boots the stock kernel
- * follows. Android does not clear the bootcount, so altbootcmd keeps the
- * same choice (the microSD then takes slot a only).
- * rc2_ums_emmc exports the whole eMMC user area read-only.
+ * bootcmd = run rc2_emmc_bootcmd. Linux boots from the slots in the eMMC
+ * "cache" partition: rc2cache maps it read-only as a blkmap (the
+ * filesystem is the whole device, "blkmap ${rc2_bm}:0") and sets
+ * rc2_blkdevparts; the slots, the bootcount and the watchdog then work as
+ * on the microSD. The Page-Down pad held when the boot command runs
+ * (rc2key) selects the stock kernel (rc2android), which also follows when
+ * no slot boots.
+ *
+ * The stock kernel has no watchdog driver, and the dw-wdt cannot be
+ * stopped once enabled (WDT_EN clears only on a reset; the kernel DT has
+ * no reset line for it): rc2android never starts it with the watchdog
+ * running. rc2_android checks WDT_CR.WDT_EN first and, when it is set,
+ * fires the watchdog at once ("wdt expire": a global reset, which also
+ * clears the watchdog) instead; rc2android itself refuses as well. So a
+ * slot that fails after rc2_prep started the watchdog (bootz refused it)
+ * ends in a reset, never in Android. A slot whose rc2.dtb fails "fdt
+ * addr" or whose zImage lacks the zImage magic is given up in rc2_load,
+ * before the watchdog starts.
+ *
+ * Falling back after a watchdog reset takes the cable or the Page-Down
+ * pad: the bootcount climbs only while the DDR keeps it. On battery the
+ * watchdog reset may drop the power hold, the book switches off, the
+ * count is lost, and every power-on tries the same slot again; Page-Down
+ * touched after power-on then selects the stock kernel.
+ *
+ * Bootcount ladder (the DDR word, kept across the core reset and, on the
+ * cable, a watchdog reset; FlashBoot does not touch it; lost at power
+ * off): up to bootlimit, bootcmd (slot b, slot a); bootlimit + 1
+ * (rc2_alt_slot_a), altbootcmd tries slot a once; above that, the stock
+ * kernel at once, the watchdog never started in that boot. The pad
+ * selects the stock kernel at any count. rc2_android clears the
+ * bootcount before rc2android (Android never clears it), so the next
+ * reset from Android starts the ladder again.
+ * A slot may hold slot.env, "rc2_slot_args=WORDS" (one line, at most
+ * 256 bytes read), appended to the kernel command line (e.g.
+ * rc2.ramroot=1). The command line names the eMMC as rc2.part=emmc and
+ * carries rc2_blkdevparts. rc2_ums_emmc exports the whole eMMC user area
+ * read-only.
  */
+#define RC2_FS			"blkmap ${rc2_bm}"
+#define RC2_FS_PARTS		"0"
+#define RC2_PART_ARG		"emmc"
+#define RC2_BOOTARGS_TAIL	" ${rc2_blkdevparts} ${rc2_slot_args}"
+#define RC2_LOAD_TAIL		" && run rc2_fdt_ok && run rc2_load_slot_env && run rc2_zimage_ok"
 #define RC2_ALTBOOTCMD \
-	"altbootcmd=if rc2key; then echo rc2: Page-Down: microSD slot a; " \
-		"setenv rc2_slot a; run rc2_boot; fi; run rc2_android\0"
+	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}; " \
+		"if rc2key; then echo rc2: Page-Down: stock kernel; " \
+		"else run rc2_emmc_alt; fi; run rc2_android\0"
 #define RC2_EMMC_ENV \
-	"rc2_android=echo rc2: stock kernel from the eMMC; rc2android\0" \
-	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: microSD; " \
-		"run rc2_bootcmd; fi; run rc2_android\0" \
+	"rc2_alt_slot_a=3\0" \
+	"rc2_android=run rc2_wdt_state; " \
+		"if test \"${rc2_wdt_on}\" = 1; then run rc2_wdt_fire; fi; " \
+		"echo rc2: stock kernel from the eMMC; " \
+		"mw.l " __stringify(CONFIG_SYS_BOOTCOUNT_ADDR) " 0; dcache flush; rc2android\0" \
+	"rc2_wdt_fire=echo rc2: watchdog running, the stock kernel would not feed it: " \
+		"watchdog reset; wdt dev watchdog@2004c000 && wdt expire; reset\0" \
+	"rc2_emmc_bootcmd=if rc2key; then echo rc2: Page-Down: stock kernel; " \
+		"else run rc2_emmc_linux; fi; run rc2_android\0" \
+	"rc2_emmc_linux=if rc2cache; then run rc2_bootcmd; " \
+		"else echo rc2: no Linux slots on the eMMC; fi\0" \
+	"rc2_emmc_alt=if itest ${bootcount} -le ${rc2_alt_slot_a}; then " \
+		"run rc2_emmc_slot_a; else echo rc2: bootcount ${bootcount}: " \
+		"stock kernel, no watchdog; fi\0" \
+	"rc2_emmc_slot_a=if rc2cache; then setenv rc2_slot a; run rc2_boot; " \
+		"echo rc2: slot a failed; fi\0" \
+	"rc2_load_slot_env=setenv rc2_slot_args; " \
+		"if test -e " RC2_FS ":${rc2_part} /rc2boot/${rc2_slot}/slot.env; then " \
+		"load " RC2_FS ":${rc2_part} ${scriptaddr} " \
+		"/rc2boot/${rc2_slot}/slot.env 0x100 && " \
+		"env import -t -r ${scriptaddr} ${filesize} rc2_slot_args; else true; fi\0" \
+	"rc2_fdt_ok=if fdt addr ${fdt_addr_r}; then true; else " \
+		"echo rc2: slot ${rc2_slot}: rc2.dtb is not a device tree; false; fi\0" \
+	"rc2_zimage_ok=setexpr rc2_zm ${kernel_addr_r} + 0x24; " \
+		"if itest.l *${rc2_zm} == 0x016f2818; then true; else " \
+		"echo rc2: slot ${rc2_slot}: no zImage magic; false; fi\0" \
 	"rc2_ums_emmc=echo rc2: eMMC over USB mass storage, read only; " \
 		"setenv stdin serial; setenv stdout serial; setenv stderr serial; " \
 		"ums 0 mmc 1; setenv stdin serial,usbacm; " \
 		"setenv stdout serial,usbacm; setenv stderr serial,usbacm\0"
 #else
+#define RC2_FS			"mmc 0"
+#define RC2_FS_PARTS		"2 1"
+#define RC2_PART_ARG		"${rc2_part}"
+#define RC2_BOOTARGS_TAIL	""
+#define RC2_LOAD_TAIL		""
 #define RC2_ALTBOOTCMD \
 	"altbootcmd=echo rc2: bootcount ${bootcount} above bootlimit ${bootlimit}, slot a; " \
 		"setenv rc2_slot a; run rc2_boot; echo rc2: slot a failed\0"
@@ -111,24 +178,24 @@
 	"rc2_args=console=ttyGS0,115200 loglevel=8 ignore_loglevel " \
 		"softlockup_panic=1 hung_task_panic=1 " \
 		"rc2ml.savelog=1\0" \
-	"rc2_find=setenv rc2_part; for p in 2 1; do " \
+	"rc2_find=setenv rc2_part; for p in " RC2_FS_PARTS "; do " \
 		"if test -z \"${rc2_part}\" && " \
-		"test -e mmc 0:${p} /rc2boot/${rc2_slot}/zImage; then " \
+		"test -e " RC2_FS ":${p} /rc2boot/${rc2_slot}/zImage; then " \
 		"setenv rc2_part ${p}; fi; done; test -n \"${rc2_part}\"\0" \
 	"rc2_load_rd=setenv rc2_rd -; " \
-		"if test -e mmc 0:${rc2_part} /rc2boot/${rc2_slot}/initrd.gz; then " \
-		"load mmc 0:${rc2_part} ${ramdisk_addr_r} " \
+		"if test -e " RC2_FS ":${rc2_part} /rc2boot/${rc2_slot}/initrd.gz; then " \
+		"load " RC2_FS ":${rc2_part} ${ramdisk_addr_r} " \
 		"/rc2boot/${rc2_slot}/initrd.gz && " \
 		"setenv rc2_rd ${ramdisk_addr_r}:${filesize}; else true; fi\0" \
 	"rc2_load=run rc2_find && " \
-		"load mmc 0:${rc2_part} ${kernel_addr_r} /rc2boot/${rc2_slot}/zImage && " \
-		"load mmc 0:${rc2_part} ${fdt_addr_r} /rc2boot/${rc2_slot}/rc2.dtb && " \
-		"run rc2_load_rd\0" \
+		"load " RC2_FS ":${rc2_part} ${kernel_addr_r} /rc2boot/${rc2_slot}/zImage && " \
+		"load " RC2_FS ":${rc2_part} ${fdt_addr_r} /rc2boot/${rc2_slot}/rc2.dtb && " \
+		"run rc2_load_rd" RC2_LOAD_TAIL "\0" \
 	"rc2_prep=fdt addr ${fdt_addr_r} && fdt resize 0x1000 && " \
 		"if test \"${rc2_wdt_dt}\" = 1; then " \
 		"fdt set /watchdog@2004c000 status okay; fi; " \
 		"setenv bootargs \"${rc2_args} rc2.loader=uboot rc2.slot=${rc2_slot} " \
-		"rc2.part=${rc2_part} rc2.bootcount=${bootcount}\"; " \
+		"rc2.part=" RC2_PART_ARG " rc2.bootcount=${bootcount}" RC2_BOOTARGS_TAIL "\"; " \
 		"if test \"${rc2_wdt}\" = 1; then " \
 		"wdt dev watchdog@2004c000 && wdt start ${rc2_wdt_ms}; " \
 		"else run rc2_wdt_state; " \
