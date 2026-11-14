@@ -49,6 +49,13 @@
 #define GRF_OS_REG1		0x200081cc
 #define GRF_SOC_CON2_ADDR	0x20008148
 
+/* SPL: idle DDR clocks before auto power-down; 0 keeps it off */
+#ifdef CONFIG_RK3026_DDR_PD_IDLE
+#define DDR_PD_IDLE	CONFIG_RK3026_DDR_PD_IDLE
+#else
+#define DDR_PD_IDLE	0
+#endif
+
 struct rk3026_sdram_priv {
 	struct rk3026_cru *cru;
 	struct rk3026_grf *grf;
@@ -689,6 +696,29 @@ static void move_to_access_state(struct rk3026_sdram_priv *priv)
 	}
 }
 
+/*
+ * Arm the controller's automatic power-down once the DRAM is up and trained,
+ * as the vendor kernel does on this SoC family: MCFG pd_idle (CKE goes low
+ * after that many idle DDR clocks; the next request waits tXP, or tXPDLL from
+ * a slow-exit precharge power-down) and MCFG1 hw_exit_idle_en, both written
+ * in the Config state. Not before the DQS training: the vendor DDR init
+ * blob, which pctl_cfg() follows, keeps pd_idle at 0 through it. No later
+ * stage of a mainline boot programs the controller, so this is the only place.
+ */
+static void pctl_low_power_cfg(struct rk3026_sdram_priv *priv)
+{
+	struct rk3026_ddr_pctl *pctl = priv->pctl;
+
+	if (!DDR_PD_IDLE)
+		return;
+
+	move_to_config_state(priv);
+	/* pctl_cfg() left the field at 0 */
+	setbits_le32(&pctl->mcfg, (DDR_PD_IDLE & PD_IDLE_MASK) << PD_IDLE_SHIFT);
+	writel(HW_EXIT_IDLE_EN_MASK << HW_EXIT_IDLE_EN_SHIFT, &pctl->mcfg1);
+	move_to_access_state(priv);
+}
+
 static void pctl_cfg(struct rk3026_sdram_priv *priv)
 {
 	struct rk3026_ddr_pctl *pctl = priv->pctl;
@@ -889,4 +919,5 @@ void sdram_init(void)
 	move_to_access_state(&sdram_priv);
 	data_training(&sdram_priv);
 	dram_cfg_rbc(&sdram_priv);
+	pctl_low_power_cfg(&sdram_priv);
 }

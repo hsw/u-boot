@@ -75,6 +75,20 @@ config RK3026_DDR_396MHZ
 
 endchoice
 
+config RK3026_DDR_PD_IDLE
+	hex "SPL DDR auto power-down idle period (DDR clocks)"
+	depends on SPL
+	range 0x0 0xff
+	default 0x40
+	help
+	  After the DDR init, the SPL lets the DDR controller put the DRAM
+	  into power-down (CKE low) once its command interface has been idle
+	  for this many DDR clocks; the next request wakes it after tXP
+	  (tXPDLL from a slow-exit precharge power-down). 0x40 is the value
+	  the vendor kernel programs on this SoC family once it is up; 0
+	  leaves auto power-down off, as the vendor DDR init blob does.
+	  Nothing later in the boot changes it.
+
 config SYS_SOC
 	default "rk3026"
 
